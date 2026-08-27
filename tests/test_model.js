@@ -68,5 +68,91 @@ check("limit is honoured", 1, M.searchRegions(REGIONS, "Kyiv", 1).length);
 check("no matches is an empty list", [], ids(M.searchRegions(REGIONS, "Zzzzzz", 10)));
 check("a null region list does not throw", [], M.searchRegions(null, "Kyiv", 10));
 
+// --- payload parsing --------------------------------------------------------
+
+check("parses a good payload",
+  { ok: true, unchanged: false, lastActionIndex: "42",
+    regions: [{ id: "36", name: "R", nameEn: "", alerts: [{ type: "AIR", since: "2026-08-27T08:00:00Z" }] }],
+    error: "" },
+  M.parsePayload('{"ok":true,"lastActionIndex":"42","regions":[{"id":"36","name":"R","alerts":[{"type":"AIR","since":"2026-08-27T08:00:00Z"}]}]}'));
+check("parses an in-band failure", false, M.parsePayload('{"ok":false,"error":"boom"}').ok);
+check("keeps the error message", "boom", M.parsePayload('{"ok":false,"error":"boom"}').error);
+check("unparseable text is a failure, not a throw", false, M.parsePayload("not json").ok);
+check("empty text is a failure", false, M.parsePayload("").ok);
+check("a JSON scalar is a failure", false, M.parsePayload("42").ok);
+check("unchanged is carried through", true, M.parsePayload('{"ok":true,"unchanged":true,"lastActionIndex":"9"}').unchanged);
+check("a region with no alerts parses to an empty list",
+  [], M.parsePayload('{"ok":true,"regions":[{"id":"81","name":"K","alerts":[]}]}').regions[0].alerts);
+
+// --- config resolution ------------------------------------------------------
+
+function rids(rs) { return rs.map(function (r) { return r.id; }); }
+
+check("shell.json regions win over the state file",
+  ["31"], rids(M.resolveRegions([{ id: "31", label: "Kyiv" }], [{ id: "14", label: "Oblast" }])));
+check("state file is used when shell.json has none",
+  ["14"], rids(M.resolveRegions([], [{ id: "14", label: "Oblast" }])));
+check("nothing configured yields nothing", [], M.resolveRegions(null, null));
+check("a missing label is derived from the name",
+  "Vinnytskyi r.", M.resolveRegions([{ id: "36", name: "Вінницький район", type: "District" }], null)[0].label);
+check("an explicit label is preserved",
+  "Home", M.resolveRegions([{ id: "36", name: "Вінницький район", label: "Home" }], null)[0].label);
+check("ids are coerced to strings", "36", M.resolveRegions([{ id: 36 }], null)[0].id);
+check("an entry with no id is dropped", [], M.resolveRegions([{ label: "nope" }], null));
+check("a resolved region starts with no alerts", [], M.resolveRegions([{ id: "1" }], null)[0].alerts);
+
+// --- aggregate state --------------------------------------------------------
+
+const NOW = Date.parse("2026-08-27T10:00:00Z");
+const CLEAR = [{ id: "1", label: "A", alerts: [] }];
+const ALERT = [{ id: "1", label: "A", alerts: [{ type: "AIR", since: "2026-08-27T09:00:00Z" }] }];
+
+check("no regions is unconfigured", "unconfigured", M.aggregate([], NOW, NOW, 60).status);
+check("fresh and clear", "clear", M.aggregate(CLEAR, NOW, NOW, 60).status);
+check("fresh and alerting", "alert", M.aggregate(ALERT, NOW, NOW, 60).status);
+check("stale and clear becomes unknown", "unknown", M.aggregate(CLEAR, NOW - 61000, NOW, 60).status);
+// The load-bearing rule: losing the network mid-alert must not read as calm.
+check("stale and alerting stays alert", "alert", M.aggregate(ALERT, NOW - 61000, NOW, 60).status);
+check("stale and alerting is flagged stale", true, M.aggregate(ALERT, NOW - 61000, NOW, 60).stale);
+check("fresh alert is not flagged stale", false, M.aggregate(ALERT, NOW, NOW, 60).stale);
+check("exactly at the threshold is still fresh", "clear", M.aggregate(CLEAR, NOW - 60000, NOW, 60).status);
+check("one millisecond past the threshold is stale", "unknown", M.aggregate(CLEAR, NOW - 60001, NOW, 60).status);
+check("a never-fetched widget is unknown, not clear", "unknown", M.aggregate(CLEAR, 0, NOW, 60).status);
+check("primary is the alerting region", "1", M.aggregate(ALERT, NOW, NOW, 60).primary.region.id);
+check("clear has no primary", null, M.aggregate(CLEAR, NOW, NOW, 60).primary);
+
+const MIXED = [
+  { id: "1", label: "A", alerts: [] },
+  { id: "2", label: "B", alerts: [{ type: "ARTILLERY", since: "2026-08-27T09:30:00Z" }] }
+];
+check("one alerting region alerts the whole widget", "alert", M.aggregate(MIXED, NOW, NOW, 60).status);
+check("primary skips the clear region", "2", M.aggregate(MIXED, NOW, NOW, 60).primary.region.id);
+
+// --- formatting -------------------------------------------------------------
+
+check("minutes under an hour", "12m", M.formatElapsed("2026-08-27T09:48:00Z", NOW));
+check("hours and minutes", "1h 24m", M.formatElapsed("2026-08-27T08:36:00Z", NOW));
+check("days and hours", "3d 4h", M.formatElapsed("2026-08-24T06:00:00Z", NOW));
+// Luhansk oblast has carried the same alert since 2022-04-04.
+check("a multi-year alert does not overflow", "1605d", M.formatElapsed("2022-04-04T16:45:00Z", NOW));
+check("a future timestamp clamps to zero", "0m", M.formatElapsed("2026-08-27T11:00:00Z", NOW));
+check("an unparseable timestamp is empty", "", M.formatElapsed("nonsense", NOW));
+check("an empty timestamp is empty", "", M.formatElapsed("", NOW));
+
+check("air is abbreviated", "AIR", M.alertAbbrev("AIR"));
+check("urban fights is abbreviated", "URBAN", M.alertAbbrev("URBAN_FIGHTS"));
+check("artillery is abbreviated", "ARTY", M.alertAbbrev("ARTILLERY"));
+check("an unknown type falls back to itself", "WEIRD", M.alertAbbrev("WEIRD"));
+
+check("pill omits the label for a single region",
+  "AIR 1h 0m", M.pillText(M.aggregate(ALERT, NOW, NOW, 60), 1, NOW));
+check("pill prefixes the label when several regions are watched",
+  "A AIR 1h 0m", M.pillText(M.aggregate(ALERT, NOW, NOW, 60), 2, NOW));
+check("a stale alert marks the elapsed time as extrapolated",
+  "~AIR 1h 0m", M.pillText(M.aggregate(ALERT, NOW - 61000, NOW, 60), 1, NOW));
+check("clear pill is empty", "", M.pillText(M.aggregate(CLEAR, NOW, NOW, 60), 1, NOW));
+check("unknown pill is a question mark", "?", M.pillText(M.aggregate(CLEAR, 0, NOW, 60), 1, NOW));
+check("unconfigured pill prompts for setup", "set region", M.pillText(M.aggregate([], NOW, NOW, 60), 0, NOW));
+
 console.log("\n" + pass + " passed, " + fail + " failed");
 process.exit(fail === 0 ? 0 : 1);

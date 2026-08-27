@@ -133,6 +133,142 @@ function defaultLabel(name, type) {
   return latin + suffix;
 }
 
+// --- payload ----------------------------------------------------------------
+
+// fetch-alerts promises one line of JSON, always. Anything else — a crash, an
+// empty read, a half-written line — is treated as a failed fetch rather than
+// allowed to throw inside a QML property binding.
+function parsePayload(text) {
+  var bad = { ok: false, unchanged: false, lastActionIndex: "", regions: [], error: "" };
+  var raw;
+  try {
+    raw = JSON.parse(String(text || ""));
+  } catch (e) {
+    bad.error = "unparseable response";
+    return bad;
+  }
+  if (!raw || typeof raw !== "object") {
+    bad.error = "unparseable response";
+    return bad;
+  }
+  if (raw.ok !== true) {
+    bad.error = String(raw.error || "fetch failed");
+    return bad;
+  }
+
+  var regions = [];
+  var src = raw.regions || [];
+  for (var i = 0; i < src.length; i++) {
+    var r = src[i] || {};
+    var alerts = [];
+    var as = r.alerts || [];
+    for (var j = 0; j < as.length; j++) {
+      alerts.push({ type: String(as[j].type || ""), since: String(as[j].since || "") });
+    }
+    regions.push({
+      id: String(r.id || ""),
+      name: String(r.name || ""),
+      nameEn: String(r.nameEn || ""),
+      alerts: alerts
+    });
+  }
+  return {
+    ok: true,
+    unchanged: raw.unchanged === true,
+    lastActionIndex: String(raw.lastActionIndex || ""),
+    regions: regions,
+    error: ""
+  };
+}
+
+// --- configuration ----------------------------------------------------------
+
+// shell.json is user-authored config and wins; the state file is whatever the
+// picker saved. Keeping them apart means the widget never rewrites the user's
+// own config file.
+function resolveRegions(shellRegions, stateRegions) {
+  var src = (shellRegions && shellRegions.length) ? shellRegions
+    : ((stateRegions && stateRegions.length) ? stateRegions : []);
+  var out = [];
+  for (var i = 0; i < src.length; i++) {
+    var r = src[i] || {};
+    if (r.id === undefined || r.id === null || String(r.id) === "") continue;
+    var name = String(r.name || "");
+    var type = String(r.type || "State");
+    out.push({
+      id: String(r.id),
+      name: name,
+      type: type,
+      label: String(r.label || (name ? defaultLabel(name, type) : String(r.id))),
+      alerts: []
+    });
+  }
+  return out;
+}
+
+// --- state ------------------------------------------------------------------
+
+function aggregate(regions, lastOkFetchMs, nowMs, staleAfterSeconds) {
+  if (!regions || !regions.length) {
+    return { status: "unconfigured", stale: false, primary: null };
+  }
+
+  var fresh = lastOkFetchMs > 0 && (nowMs - lastOkFetchMs) <= staleAfterSeconds * 1000;
+  var primary = null;
+  for (var i = 0; i < regions.length && !primary; i++) {
+    if (regions[i].alerts && regions[i].alerts.length) {
+      primary = { region: regions[i], alert: regions[i].alerts[0] };
+    }
+  }
+
+  // An active alert outranks staleness. Under-reporting an alert is the
+  // dangerous direction; over-reporting one is merely annoying.
+  if (primary) return { status: "alert", stale: !fresh, primary: primary };
+  if (!fresh) return { status: "unknown", stale: true, primary: null };
+  return { status: "clear", stale: false, primary: null };
+}
+
+// --- formatting -------------------------------------------------------------
+
+function formatElapsed(sinceIso, nowMs) {
+  var started = Date.parse(String(sinceIso || ""));
+  if (isNaN(started)) return "";
+  var sec = Math.floor((nowMs - started) / 1000);
+  if (sec < 0) sec = 0;
+  var min = Math.floor(sec / 60);
+  if (min < 60) return min + "m";
+  var hr = Math.floor(min / 60);
+  if (hr < 24) return hr + "h " + (min % 60) + "m";
+  var day = Math.floor(hr / 24);
+  // Luhansk oblast has been under the same alert since 2022-04-04, so this
+  // has to stay readable at four digits of days.
+  if (day < 30) return day + "d " + (hr % 24) + "h";
+  return day + "d";
+}
+
+var ABBREV = {
+  "AIR": "AIR", "ARTILLERY": "ARTY", "URBAN_FIGHTS": "URBAN",
+  "CHEMICAL": "CHEM", "NUCLEAR": "NUCLEAR", "INFO": "INFO"
+};
+
+function alertAbbrev(type) {
+  var t = String(type || "");
+  return ABBREV.hasOwnProperty(t) ? ABBREV[t] : t;
+}
+
+function pillText(agg, regionCount, nowMs) {
+  if (!agg) return "";
+  if (agg.status === "unconfigured") return "set region";
+  if (agg.status === "unknown") return "?";
+  if (agg.status !== "alert" || !agg.primary) return "";
+  var elapsed = formatElapsed(agg.primary.alert.since, nowMs);
+  var body = alertAbbrev(agg.primary.alert.type) + (elapsed ? " " + elapsed : "");
+  // A tilde marks a value extrapolated from the last successful fetch rather
+  // than one just confirmed.
+  if (agg.stale) body = "~" + body;
+  return regionCount > 1 ? agg.primary.region.label + " " + body : body;
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     romanize: romanize,
@@ -140,6 +276,12 @@ if (typeof module !== "undefined") {
     searchKey: searchKey,
     stemQuery: stemQuery,
     searchRegions: searchRegions,
-    defaultLabel: defaultLabel
+    defaultLabel: defaultLabel,
+    parsePayload: parsePayload,
+    resolveRegions: resolveRegions,
+    aggregate: aggregate,
+    formatElapsed: formatElapsed,
+    alertAbbrev: alertAbbrev,
+    pillText: pillText
   };
 }
