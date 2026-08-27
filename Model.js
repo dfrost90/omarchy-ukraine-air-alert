@@ -359,17 +359,43 @@ function historySummaryText(alarms, nowMs, windowHours, fetchLimit) {
 
 // --- state ------------------------------------------------------------------
 
-function aggregate(regions, lastOkFetchMs, nowMs, staleAfterSeconds) {
+// Which of several watched regions the pill speaks for. Only meaningful when
+// more than one is alerting at once — a primary that is clear never suppresses
+// another region's alert, because the user chose to watch that one too.
+function resolvePrimaryId(regions, primaryId) {
+  var id = String(primaryId || "");
+  if (!isRegionId(id)) return "";
+  for (var i = 0; i < (regions || []).length; i++) {
+    if (regions[i] && String(regions[i].id) === id) return id;
+  }
+  return "";
+}
+
+function aggregate(regions, lastOkFetchMs, nowMs, staleAfterSeconds, primaryId) {
   if (!regions || !regions.length) {
     return { status: "unconfigured", stale: false, primary: null };
   }
 
   var fresh = lastOkFetchMs > 0 && (nowMs - lastOkFetchMs) <= staleAfterSeconds * 1000;
+
+  var alerting = [];
+  for (var i = 0; i < regions.length; i++) {
+    if (regions[i].alerts && regions[i].alerts.length) alerting.push(regions[i]);
+  }
+
   var primary = null;
-  for (var i = 0; i < regions.length && !primary; i++) {
-    if (regions[i].alerts && regions[i].alerts.length) {
-      primary = { region: regions[i], alert: regions[i].alerts[0] };
+  var wanted = resolvePrimaryId(regions, primaryId);
+  if (wanted) {
+    for (var j = 0; j < alerting.length && !primary; j++) {
+      if (String(alerting[j].id) === wanted) {
+        primary = { region: alerting[j], alert: alerting[j].alerts[0] };
+      }
     }
+  }
+  // Falls through to the first alerting region: a pinned primary decides who
+  // wins a tie, never who gets silenced.
+  if (!primary && alerting.length) {
+    primary = { region: alerting[0], alert: alerting[0].alerts[0] };
   }
 
   // An active alert outranks staleness. Under-reporting an alert is the
@@ -480,6 +506,7 @@ if (typeof module !== "undefined") {
     relabelIn: relabelIn,
     historySummary: historySummary,
     historySummaryText: historySummaryText,
+    resolvePrimaryId: resolvePrimaryId,
     aggregate: aggregate,
     formatElapsed: formatElapsed,
     formatDuration: formatDuration,

@@ -142,6 +142,18 @@ You can watch several regions at once. Each gets an editable display label —
 useful for showing an English name for a Ukrainian region — which never
 changes which region is actually monitored.
 
+### Which region the pill speaks for
+
+With more than one region watched, a star appears beside each. The starred
+region is the one the pill shows **when several are alerting at once**.
+
+It never silences anything. If your starred region is clear and another
+watched region is alerting, the pill shows that other region's alert, labelled
+so you can see it is not your primary. You chose to watch it; hiding it would
+be the same under-reporting the `~` marker exists to avoid.
+
+Removing the starred region clears the star rather than leaving it dangling.
+
 If your Omarchy weather location is set, the picker opens pre-filtered to it as
 a **suggestion**. It is never applied on its own. Measured against the live
 region list, romanized matching of 32 Ukrainian cities resolved 12 uniquely, 16
@@ -164,6 +176,7 @@ All optional. Pinning `regions` in `shell.json` overrides the picker.
     { "id": "31", "label": "Kyiv" },
     { "id": "36", "label": "Vinnytskyi" }
   ],
+  "primaryId": "31",
   "pollSeconds": 90,
   "staleAfterSeconds": 180,
   "icon": "󰀦"
@@ -173,6 +186,7 @@ All optional. Pinning `regions` in `shell.json` overrides the picker.
 | Key | Default | Meaning |
 |---|---|---|
 | `regions` | *(picker)* | Pinned regions, max 32. Overrides the picker's saved choice. |
+| `primaryId` | *(picker)* | Region id the pill favours when several alert at once. Overrides the star, and hides it in the panel. |
 | `pollSeconds` | `90` | Poll interval in seconds. Minimum 10. |
 | `staleAfterSeconds` | `60` | How long without a successful fetch before the data counts as stale. Floored at `pollSeconds * 2`, so 180s at the default interval. |
 | `icon` | `󰀦` | Bar glyph. |
@@ -227,7 +241,7 @@ last 24 hours — how many there have been says more than any single row.
 bash tests/run
 ```
 
-217 assertions: the fetch script against a stubbed `curl` (no request leaves
+229 assertions: the fetch script against a stubbed `curl` (no request leaves
 the machine), and every pure function in `Model.js` under node.
 
 ## Licence

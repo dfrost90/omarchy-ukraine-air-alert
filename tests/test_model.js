@@ -343,5 +343,45 @@ check("the parts recompose", "A AIR 1h 0m",
   (M.pillRegionLabel(M.aggregate(ALERT, NOW, NOW, 60), 2) + " "
    + M.pillStatus(M.aggregate(ALERT, NOW, NOW, 60), NOW)).trim());
 
+// --- primary region ---------------------------------------------------------
+//
+// Which region the pill speaks for when several are watched. It decides who
+// wins when more than one is alerting -- it never silences a region that is.
+
+const TWO_ALERTING = [
+  { id: "1", label: "A", alerts: [{ type: "AIR", since: "2026-08-27T09:00:00Z" }] },
+  { id: "2", label: "B", alerts: [{ type: "ARTILLERY", since: "2026-08-27T09:30:00Z" }] }
+];
+const SECOND_ONLY = [
+  { id: "1", label: "A", alerts: [] },
+  { id: "2", label: "B", alerts: [{ type: "ARTILLERY", since: "2026-08-27T09:30:00Z" }] }
+];
+
+check("with no primary set, the first alerting region wins",
+  "1", M.aggregate(TWO_ALERTING, NOW, NOW, 60, "").primary.region.id);
+check("the chosen primary wins when both are alerting",
+  "2", M.aggregate(TWO_ALERTING, NOW, NOW, 60, "2").primary.region.id);
+check("choosing the first still works", "1", M.aggregate(TWO_ALERTING, NOW, NOW, 60, "1").primary.region.id);
+// The load-bearing rule: a pinned primary must not silence another region.
+check("a clear primary does not hide another region's alert",
+  "2", M.aggregate(SECOND_ONLY, NOW, NOW, 60, "1").primary.region.id);
+check("and the widget still reads as alerting",
+  "alert", M.aggregate(SECOND_ONLY, NOW, NOW, 60, "1").status);
+check("a primary id that is not configured is ignored",
+  "1", M.aggregate(TWO_ALERTING, NOW, NOW, 60, "999").primary.region.id);
+check("a clear widget has no primary regardless",
+  null, M.aggregate(CLEAR, NOW, NOW, 60, "1").primary);
+
+check("resolvePrimaryId keeps a configured id", "2", M.resolvePrimaryId(TWO_ALERTING, "2"));
+check("resolvePrimaryId drops an unconfigured id", "", M.resolvePrimaryId(TWO_ALERTING, "999"));
+check("resolvePrimaryId drops a malformed id", "", M.resolvePrimaryId(TWO_ALERTING, "--regions"));
+check("resolvePrimaryId on an empty list is empty", "", M.resolvePrimaryId([], "1"));
+
+// Removing the primary region must not leave a dangling pointer.
+check("removing the primary clears it",
+  "", M.resolvePrimaryId(M.removeRegionFrom(
+    [{ id: "1", name: "a", type: "State", label: "A" },
+     { id: "2", name: "b", type: "State", label: "B" }], "2"), "2"));
+
 console.log("\n" + pass + " passed, " + fail + " failed");
 process.exit(fail === 0 ? 0 : 1);

@@ -9,6 +9,8 @@ Initial release.
 - Panel with per-region status, recent alert history, and a region picker
   searchable in Ukrainian or Latin script.
 - Passive by design: no notifications, no sound.
+- With several regions watched, a starred region decides which one the pill
+  shows when more than one is alerting; it never silences the others.
 - An active alert outranks staleness — losing the network mid-alert keeps
   showing the alert rather than degrading to "unknown".
 - All network access behind one bounded seam; every response and file read is

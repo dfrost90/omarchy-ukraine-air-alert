@@ -226,9 +226,20 @@ Panel {
     return Model.copySelection(configured)
   }
 
-  function saveSelection(list) {
-    stateFile.setText(JSON.stringify({ regions: list }, null, 2) + "\n")
+  function saveSelection(list, primary) {
+    var id = Model.resolvePrimaryId(list, primary === undefined ? root.primaryId : primary)
+    stateFile.setText(JSON.stringify({ regions: list, primaryId: id }, null, 2) + "\n")
   }
+
+  // Only meaningful with more than one region watched, and only when several
+  // are alerting at once — it decides who wins, never who is silenced.
+  function setPrimary(id) {
+    saveSelection(currentSelection(), id)
+  }
+
+  readonly property string primaryId: hostWidget ? hostWidget.primaryId : ""
+  readonly property bool primaryPinnedInShell:
+    hostWidget && hostWidget.shellPrimaryId !== ""
 
   function addRegion(r) {
     saveSelection(Model.addRegionTo(currentSelection(), r))
@@ -236,6 +247,8 @@ Panel {
   }
 
   function removeRegion(id) {
+    // resolvePrimaryId inside saveSelection drops the pointer if the region
+    // being removed was the primary, so it cannot dangle.
     saveSelection(Model.removeRegionFrom(currentSelection(), id))
   }
 
@@ -448,8 +461,19 @@ Panel {
             width: col.width
             spacing: Style.space(6)
 
+            PanelActionButton {
+              visible: root.configured.length > 1 && !root.primaryPinnedInShell
+              iconText: root.primaryId === modelData.id ? "★" : "☆"
+              foreground: root.primaryId === modelData.id ? Color.urgent : root.fg
+              tooltipText: root.primaryId === modelData.id
+                ? "Shown on the bar when several regions alert at once"
+                : "Show this region on the bar when several alert at once"
+              anchors.verticalCenter: parent.verticalCenter
+              onClicked: root.setPrimary(modelData.id)
+            }
+
             Text {
-              width: col.width * 0.40
+              width: col.width * (root.configured.length > 1 ? 0.32 : 0.40)
               elide: Text.ElideRight
               text: Model.plain(modelData.name || modelData.id)
               textFormat: Text.PlainText

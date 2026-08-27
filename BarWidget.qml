@@ -45,6 +45,11 @@ BarWidget {
   // shell.json wins over the picker's state file; see Model.resolveRegions.
   property var shellRegions: setting("regions", [])
   property var stateRegions: []
+  // Which watched region the pill speaks for when several alert at once.
+  property string shellPrimaryId: String(setting("primaryId", ""))
+  property string statePrimaryId: ""
+  readonly property string primaryId:
+    shellPrimaryId !== "" ? shellPrimaryId : statePrimaryId
   readonly property var regions: Model.resolveRegions(shellRegions, stateRegions)
 
   property double lastOkFetch: 0
@@ -70,12 +75,13 @@ BarWidget {
   property string pillStatus: ""
 
   function recompute() {
-    agg = Model.aggregate(activeRegions, lastOkFetch, tick, staleAfterSeconds)
+    agg = Model.aggregate(activeRegions, lastOkFetch, tick, staleAfterSeconds, primaryId)
     pillRegion = Model.pillRegionLabel(agg, regions.length)
     pillStatus = Model.pillStatus(agg, tick)
   }
 
   onTickChanged: recompute()
+  onPrimaryIdChanged: recompute()
   Component.onCompleted: { activeRegions = regions; recompute() }
 
   readonly property color stateColor:
@@ -179,8 +185,10 @@ BarWidget {
     try {
       var parsed = JSON.parse(stateView.text())
       stateRegions = (parsed && parsed.regions) ? parsed.regions : []
+      statePrimaryId = (parsed && parsed.primaryId) ? String(parsed.primaryId) : ""
     } catch (e) {
       stateRegions = []
+      statePrimaryId = ""
     }
   }
 
