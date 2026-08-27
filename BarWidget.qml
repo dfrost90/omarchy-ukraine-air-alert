@@ -26,7 +26,7 @@ BarWidget {
 
   // Sanitized because WidgetButton's internal Text uses AutoText, which would
   // rich-text-parse a crafted settings value.
-  readonly property string icon: plain(setting("icon", "󰀦"))
+  readonly property string icon: Model.plain(setting("icon", "󰀦"), 8)
 
   readonly property int pollSeconds: Math.max(5, setting("pollSeconds", 15))
   // Staleness has to outlast at least a couple of missed ticks, or a single
@@ -42,6 +42,7 @@ BarWidget {
   property double lastOkFetch: 0
   property string lastActionIndex: ""
   property string lastError: ""
+  property int consecutiveFailures: 0
 
   // Advanced by clockTimer so the elapsed time re-renders between polls.
   property double tick: Date.now()
@@ -61,7 +62,7 @@ BarWidget {
 
   function recompute() {
     agg = Model.aggregate(activeRegions, lastOkFetch, tick, staleAfterSeconds)
-    pillLabel = Model.pillText(agg, regions.length, tick)
+    pillLabel = Model.plain(Model.pillText(agg, regions.length, tick), 48)
   }
 
   onTickChanged: recompute()
@@ -71,11 +72,6 @@ BarWidget {
     agg.status === "alert" ? Color.urgent
       : agg.status === "clear" ? (bar ? bar.barForeground : Color.foreground)
       : Color.muted
-
-  function plain(value) {
-    return String(value === undefined || value === null ? "" : value)
-      .replace(/[<>&]/g, "")
-  }
 
   // Merge fetched alert state onto the configured list by id, so a configured
   // label is never overwritten by whatever the network said.
@@ -125,15 +121,25 @@ BarWidget {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var p = Model.parsePayload(String(this.text || ""))
+        // StdioCollector exposes no ceiling of its own. parsePayload refuses an
+        // oversized body too, but bounding here keeps the retained string small
+        // even when the script it runs has stopped behaving.
+        var raw = String(this.text || "")
+        if (raw.length > Model.MAX_PAYLOAD_BYTES) {
+          root.lastError = "response too large"
+          return
+        }
+        var p = Model.parsePayload(raw)
         if (!p.ok) {
           // Keep the last known regions. Staleness is measured from the last
           // successful fetch, so a persistently failing poll ages into
           // unknown rather than masquerading as fresh.
           root.lastError = p.error
+          root.consecutiveFailures = root.consecutiveFailures + 1
           return
         }
         root.lastError = ""
+        root.consecutiveFailures = 0
         if (p.lastActionIndex !== "") root.lastActionIndex = p.lastActionIndex
         // An unchanged reply is a successful confirmation that nothing moved,
         // not an absence of data — so it advances lastOkFetch.
@@ -180,7 +186,9 @@ BarWidget {
 
   Timer {
     id: pollTimer
-    interval: root.pollSeconds * 1000
+    // Widens on consecutive failures so a rate-limited or down upstream is
+    // not polled at full speed for hours.
+    interval: Model.pollInterval(root.pollSeconds, root.consecutiveFailures) * 1000
     running: root.regions.length > 0
     repeat: true
     triggeredOnStart: true
@@ -282,10 +290,11 @@ BarWidget {
     for (var i = 0; i < rs.length; i++) {
       var r = rs[i]
       if (r.alerts && r.alerts.length) {
-        lines.push(r.label + ": " + Model.alertAbbrev(r.alerts[0].type)
+        lines.push(Model.plain(r.label) + ": "
+          + Model.plain(Model.alertAbbrev(r.alerts[0].type), 32)
           + " " + Model.formatElapsed(r.alerts[0].since, tick))
       } else {
-        lines.push(r.label + ": clear")
+        lines.push(Model.plain(r.label) + ": clear")
       }
     }
     if (agg.stale) {
@@ -294,8 +303,8 @@ BarWidget {
         : "never"
       lines.push("last update: " + age)
     }
-    if (lastError !== "") lines.push(lastError)
-    return lines.join("\n")
+    if (lastError !== "") lines.push(Model.plain(lastError))
+    return Model.plain(lines.join("\n"), 1024)
   }
 
   Row {

@@ -6,11 +6,23 @@
 # {"ok":false,"error":...} so the QML side has a single parse path and never
 # has to branch on an exit code inside a property binding.
 #
-# Two modes:
+# Three modes, so that no request is made anywhere else in the plugin and every
+# response crosses exactly one bounded reader:
 #   fetch-alerts [--since IDX] [--timeout N] <regionId>...   poll for alerts
 #   fetch-alerts --regions [--force] [--timeout N]           the region catalog
+#   fetch-alerts --history <regionId> [--timeout N]          recent alerts
+#
+# siren.pp.ua is a third party. Nothing it returns is read without a ceiling,
+# and a body that reaches its ceiling is refused whole rather than truncated:
+# a truncated prefix of a hostile response can still parse as valid JSON and
+# then be believed.
 
 set -uo pipefail
+
+# Not exported: ${#var} must count bytes, which is the unit every ceiling below
+# is written in. Under a UTF-8 locale a multibyte body measures short and slips
+# past a limit it actually exceeds.
+LC_ALL=C
 
 API_BASE="${AIR_ALERT_API_BASE:-https://siren.pp.ua}"
 CURL="${AIR_ALERT_CURL:-curl}"
@@ -18,19 +30,42 @@ CACHE_DIR="${AIR_ALERT_CACHE_DIR:-$HOME/.cache/omarchy/air-alert}"
 CACHE_FILE="$CACHE_DIR/regions.json"
 CACHE_TTL=$((7 * 24 * 3600))
 
+# Measured against the live API on 2026-08-27: status 38 B, one region 246 B,
+# history 3.9 KB, the region tree 204 KB. Each ceiling leaves generous headroom
+# over the real value and is far below anything that would hurt.
+MAX_STATUS=${AIR_ALERT_MAX_STATUS:-4096}
+MAX_REGION=${AIR_ALERT_MAX_REGION:-65536}
+MAX_HISTORY=${AIR_ALERT_MAX_HISTORY:-262144}
+MAX_TREE=${AIR_ALERT_MAX_TREE:-1048576}
+MAX_CACHE=${AIR_ALERT_MAX_CACHE:-1048576}
+
+# Each configured region costs an argv entry, a request, and a QML row.
+MAX_REGION_COUNT=32
+MAX_HISTORY_ENTRIES=10
+
 TIMEOUT=8
 SINCE=""
 MODE="poll"
 FORCE=0
+HISTORY_ID=""
 REGIONS=()
 
 die_json() { jq -cn --arg e "$1" '{ok:false,error:$e}'; exit 0; }
+
+# Ceilings are validated as digits before use: bash evaluates arithmetic
+# operands as expressions, and a command substitution inside one would run.
+for v in MAX_STATUS MAX_REGION MAX_HISTORY MAX_TREE MAX_CACHE TIMEOUT; do
+  [[ "${!v}" =~ ^[0-9]+$ ]] || die_json "$v must be a positive whole number"
+done
+
+is_region_id() { [[ "$1" =~ ^[0-9]{1,12}$ ]]; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --since)   SINCE="${2:-}"; shift 2 ;;
     --timeout) TIMEOUT="${2:-8}"; shift 2 ;;
     --regions) MODE="regions"; shift ;;
+    --history) MODE="history"; HISTORY_ID="${2:-}"; shift 2 ;;
     --force)   FORCE=1; shift ;;
     -*)        die_json "unknown option: $1" ;;
     *)         REGIONS+=("$1"); shift ;;
@@ -38,37 +73,71 @@ while [ $# -gt 0 ]; do
 done
 
 [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || die_json "timeout must be a whole number"
+[[ "$SINCE" =~ ^[0-9]*$ ]] || die_json "--since must be a whole number"
 
-get() {
-  "$CURL" -fsS --compressed --max-time "$TIMEOUT" "$API_BASE$1" 2>/dev/null
+# Reads limit+1 bytes and refuses at limit+1, so a body ending exactly at the
+# ceiling stays distinguishable from one cut off by it. --max-filesize is set
+# too, but it only consults Content-Length and a chunked response carries none,
+# so the pipe ceiling is the one that actually holds.
+get_capped() {
+  local path="$1" limit="$2" out
+  out=$("$CURL" -fsS --compressed --max-time "$TIMEOUT" --max-filesize "$limit" \
+        "$API_BASE$path" 2>/dev/null | head -c $((limit + 1)))
+  [ -n "$out" ] || return 1
+  [ "${#out}" -le "$limit" ] || return 2
+  printf '%s' "$out"
 }
 
 # --- poll -------------------------------------------------------------------
 
 if [ "$MODE" = "poll" ]; then
   [ "${#REGIONS[@]}" -gt 0 ] || die_json "no region ids given"
+  [ "${#REGIONS[@]}" -le "$MAX_REGION_COUNT" ] || die_json "too many regions (max $MAX_REGION_COUNT)"
 
-  index=""
-  if [ -n "$SINCE" ]; then
-    # One ~45-byte request that says whether anything changed anywhere in
-    # Ukraine. Most ticks stop here.
-    status=$(get "/api/v3/alerts/status")
-    [ -n "$status" ] || die_json "curl failed fetching status"
-    index=$(jq -r '.lastActionIndex // empty' <<<"$status" 2>/dev/null)
-    [ -n "$index" ] || die_json "unparseable status response"
-    if [ "$index" = "$SINCE" ]; then
-      jq -cn --arg i "$index" \
-        '{ok:true,unchanged:true,lastActionIndex:$i,fetchedAt:(now|floor),regions:[]}'
-      exit 0
-    fi
+  # If nothing given is usable, refuse before spending a request. Individual
+  # bad ids are still reported per-region below so one bad entry in the state
+  # file cannot blind its neighbours.
+  valid=0
+  for id in "${REGIONS[@]}"; do
+    is_region_id "$id" && valid=$((valid + 1))
+  done
+  [ "$valid" -gt 0 ] || die_json "no valid region ids given"
+
+  # Always fetched, even with no --since: it is one ~38-byte request, and it is
+  # how the caller learns the index it needs to gate the *next* poll. Reporting
+  # an empty index on the first poll would mean the gate never engages at all
+  # and every tick pays for a full region fetch forever.
+  status=$(get_capped "/api/v3/alerts/status" "$MAX_STATUS")
+  case $? in
+    1) die_json "curl failed fetching status" ;;
+    2) die_json "status response over ceiling" ;;
+  esac
+  index=$(jq -r '.lastActionIndex // empty' <<<"$status" 2>/dev/null)
+  [[ "$index" =~ ^[0-9]+$ ]] || die_json "unparseable status response"
+
+  # Nothing has changed anywhere in Ukraine since the caller last looked, so
+  # the region fetches are skipped entirely.
+  if [ -n "$SINCE" ] && [ "$index" = "$SINCE" ]; then
+    jq -cn --arg i "$index" \
+      '{ok:true,unchanged:true,lastActionIndex:$i,fetchedAt:(now|floor),regions:[]}'
+    exit 0
   fi
 
   out="[]"
   for id in "${REGIONS[@]}"; do
-    body=$(get "/api/v3/alerts/$id")
-    if [ -z "$body" ]; then
+    # Never interpolated into a URL. Reported as a failed entry rather than
+    # aborting, so one bad id in the state file cannot blind its neighbours.
+    if ! is_region_id "$id"; then
       out=$(jq -c --arg id "$id" \
-        '. + [{id:$id,name:"",nameEn:"",alerts:[],error:"unreachable"}]' <<<"$out")
+        '. + [{id:$id,name:"",nameEn:"",alerts:[],error:"invalid id"}]' <<<"$out")
+      continue
+    fi
+    body=$(get_capped "/api/v3/alerts/$id" "$MAX_REGION")
+    rc=$?
+    if [ "$rc" != "0" ]; then
+      reason=$([ "$rc" = "2" ] && echo "over ceiling" || echo "unreachable")
+      out=$(jq -c --arg id "$id" --arg e "$reason" \
+        '. + [{id:$id,name:"",nameEn:"",alerts:[],error:$e}]' <<<"$out")
       continue
     fi
     # A clear region still comes back as an object with an empty activeAlerts,
@@ -79,7 +148,7 @@ if [ "$MODE" = "poll" ]; then
           name: ($r.regionName // ""),
           nameEn: ($r.regionEngName // ""),
           alerts: [ ($r.activeAlerts // [])[]
-                    | {type: (.type // ""), since: (.lastUpdate // "")} ] }
+                    | {type: (.type // ""), since: (.lastUpdate // "")} ][0:16] }
     ' <<<"$body" 2>/dev/null)
     if [ -z "$region" ]; then
       out=$(jq -c --arg id "$id" \
@@ -102,6 +171,30 @@ if [ "$MODE" = "poll" ]; then
   exit 0
 fi
 
+# --- history ----------------------------------------------------------------
+
+if [ "$MODE" = "history" ]; then
+  is_region_id "$HISTORY_ID" || die_json "region id must be digits"
+  body=$(get_capped "/api/v3/alerts/regionHistory?regionId=$HISTORY_ID" "$MAX_HISTORY")
+  case $? in
+    1) die_json "curl failed fetching history" ;;
+    2) die_json "history response over ceiling" ;;
+  esac
+  out=$(jq -c --arg id "$HISTORY_ID" --argjson n "$MAX_HISTORY_ENTRIES" '
+    (.[0] // {}) as $r
+    | { ok: true, id: $id,
+        alarms: [ ($r.alarms // [])[]
+                  | { alertType: (.alertType // ""),
+                      startDate: (.startDate // ""),
+                      endDate:   (.endDate // ""),
+                      duration:  (.duration // ""),
+                      isContinue: (.isContinue == true) } ][0:$n] }
+  ' <<<"$body" 2>/dev/null)
+  [ -n "$out" ] || die_json "unparseable history response"
+  printf '%s\n' "$out"
+  exit 0
+fi
+
 # --- regions ----------------------------------------------------------------
 
 flatten() {
@@ -121,8 +214,16 @@ flatten() {
                           then ($n.regionName // "") else $parent end) ]
             | add // [] );
     { ok: true, cached: false,
-      regions: ([ (.states // [])[] | flat_walk(null) ] | add // []) }
+      regions: ([ (.states // [])[] | flat_walk(null) ] | add // [])[0:4096] }
   '
+}
+
+read_cache() {
+  local out
+  out=$(head -c $((MAX_CACHE + 1)) "$CACHE_FILE" 2>/dev/null)
+  [ -n "$out" ] || return 1
+  [ "${#out}" -le "$MAX_CACHE" ] || return 2
+  printf '%s' "$out"
 }
 
 # Region ids and names change on the order of never, so a week is a
@@ -130,8 +231,11 @@ flatten() {
 if [ "$FORCE" != "1" ] && [ -f "$CACHE_FILE" ]; then
   age=$(( $(date +%s) - $(stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0) ))
   if [ "$age" -lt "$CACHE_TTL" ]; then
-    cat "$CACHE_FILE"
-    exit 0
+    if cached=$(read_cache); then
+      printf '%s\n' "$cached"
+      exit 0
+    fi
+    # An unreadable or oversized cache is not fatal — fall through and refetch.
   fi
 fi
 
@@ -139,15 +243,17 @@ serve_stale_or_die() {
   # Losing the network must not lose the region list we already had: a stale
   # catalog is strictly better than no picker, and selection being unavailable
   # must never take down alert monitoring.
-  if [ -f "$CACHE_FILE" ]; then
-    jq -c '. + {cached:true}' "$CACHE_FILE"
-    exit 0
+  if cached=$(read_cache); then
+    jq -c '. + {cached:true}' <<<"$cached" 2>/dev/null && exit 0
   fi
   die_json "$1"
 }
 
-tree=$(get "/api/v3/regions")
-[ -n "$tree" ] || serve_stale_or_die "curl failed fetching the region tree"
+tree=$(get_capped "/api/v3/regions" "$MAX_TREE")
+case $? in
+  1) serve_stale_or_die "curl failed fetching the region tree" ;;
+  2) serve_stale_or_die "region tree over ceiling" ;;
+esac
 
 flat=$(flatten <<<"$tree" 2>/dev/null)
 [ -n "$flat" ] || serve_stale_or_die "unparseable region tree"

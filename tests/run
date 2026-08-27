@@ -55,7 +55,13 @@ STUB
   export AIR_ALERT_CACHE_DIR="$SANDBOX/cache"
   export AIR_ALERT_API_BASE="https://siren.pp.ua"
   export BODIES CURL_LOG CURL_ARGS CURL_EXIT
+
+  # Every poll now begins with the status request, so give each test one by
+  # default; the tests that care override or remove it.
+  body "/api/v3/alerts/status" '{"lastActionIndex":100}'
 }
+
+unstub_status() { rm -f "$BODIES/_api_v3_alerts_status"; }
 
 body() { printf '%s' "$2" >"$BODIES/$(printf '%s' "$1" | tr '/?=&' '____')"; }
 
@@ -120,13 +126,27 @@ check "and the region data came with it" "AIR" "$(jq -r '.regions[0].alerts[0].t
 teardown
 
 setup
+body "/api/v3/alerts/status" '{"lastActionIndex":42}'
 body "/api/v3/alerts/36" "$ALERTING"
-"$FETCH" 36 >/dev/null
-check "no --since means no status request at all" \
-  "0" "$(grep -c 'alerts/status' "$CURL_LOG")"
+out=$("$FETCH" 36)
+# Without this the widget never learns an index, never passes --since, and
+# pays for a full region fetch on every tick for the life of the process.
+check "a first poll still reports an index, so the gate can engage next time" \
+  "42" "$(jq -r .lastActionIndex <<<"$out")"
+check "and it still returns the region data" "AIR" \
+  "$(jq -r '.regions[0].alerts[0].type' <<<"$out")"
 teardown
 
 setup
+unstub_status
+body "/api/v3/alerts/36" "$ALERTING"
+out=$("$FETCH" 36)
+check "an unreachable status endpoint fails the poll rather than guessing" \
+  "false" "$(jq -r .ok <<<"$out")"
+teardown
+
+setup
+unstub_status
 body "/api/v3/alerts/36" "$ALERTING"
 out=$("$FETCH" --since 12345 36)
 check "an unreachable status endpoint is a failure, not a silent full fetch" \
@@ -251,6 +271,119 @@ setup
 body "/api/v3/regions" 'not json'
 out=$("$FETCH" --regions)
 check "an unparseable tree is an in-band failure" "false" "$(jq -r .ok <<<"$out")"
+teardown
+
+# --- bounds -----------------------------------------------------------------
+#
+# siren.pp.ua is a third party. Every one of these caps exists because a host
+# that stops behaving — or anything sitting between us and it — otherwise
+# reaches a shell variable, a jq invocation, or a long-lived QML property with
+# no ceiling at all.
+
+setup
+# Well past AIR_ALERT_HTTP_MAX_REGION, with a valid JSON prefix so that
+# truncating instead of refusing would look like success.
+{ printf '%s' "$ALERTING" | head -c -1; printf ',{"pad":"'; head -c 200000 /dev/zero | tr '\0' 'A'; printf '"}]'; } \
+  >"$BODIES/_api_v3_alerts_36"
+body "/api/v3/alerts/81" "$CLEARBODY"
+out=$("$FETCH" 36 81)
+check "an oversized region body is refused, not truncated" "over ceiling" \
+  "$(jq -r '.regions[] | select(.id=="36") | .error' <<<"$out")"
+check "and its clear neighbour is unaffected" "0" \
+  "$(jq -r '.regions[] | select(.id=="81") | .alerts | length' <<<"$out")"
+teardown
+
+setup
+body "/api/v3/alerts/status" "$(printf '{"lastActionIndex":1,"pad":"%s"}' "$(head -c 20000 /dev/zero | tr '\0' 'A')")"
+body "/api/v3/alerts/36" "$ALERTING"
+out=$("$FETCH" --since 0 36)
+check "an oversized status body is refused" "false" "$(jq -r .ok <<<"$out")"
+teardown
+
+setup
+printf '{"states":[' >"$BODIES/_api_v3_regions"
+head -c 2000000 /dev/zero | tr '\0' 'A' >>"$BODIES/_api_v3_regions"
+printf ']}' >>"$BODIES/_api_v3_regions"
+out=$("$FETCH" --regions)
+check "an oversized region tree is refused" "false" "$(jq -r .ok <<<"$out")"
+teardown
+
+setup
+body "/api/v3/regions" "$TREE"
+"$FETCH" --regions >/dev/null
+head -c 2000000 /dev/zero | tr '\0' 'A' >>"$AIR_ALERT_CACHE_DIR/regions.json"
+: >"$CURL_LOG"
+out=$("$FETCH" --regions)
+check "an oversized cache is discarded, not parsed" "1" "$(wc -l <"$CURL_LOG")"
+check "and the refetched tree is served instead" "14 76 31" \
+  "$(jq -r '[.regions[].id] | join(" ")' <<<"$out")"
+teardown
+
+# Region ids reach argv. An id that looks like an option would change the
+# script's mode; anything non-numeric has no business being one.
+setup
+body "/api/v3/alerts/36" "$ALERTING"
+out=$("$FETCH" 36 './evil')
+check "a non-numeric region id never builds a URL" "0" \
+  "$(grep -c 'evil' "$CURL_LOG" || true)"
+check "and is reported as a failed entry" "invalid id" \
+  "$(jq -r '.regions[] | select(.id=="./evil") | .error' <<<"$out")"
+check "and the valid region still reports" "AIR" \
+  "$(jq -r '.regions[] | select(.id=="36") | .alerts[0].type' <<<"$out")"
+teardown
+
+setup
+out=$("$FETCH" 999999999999999999999)
+check "an over-long id is refused" "false" "$(jq -r .ok <<<"$out")"
+check "and never reached curl" "0" "$(wc -l <"$CURL_LOG" 2>/dev/null || echo 0)"
+teardown
+
+setup
+body "/api/v3/alerts/36" "$ALERTING"
+ids=$(seq 1 200 | tr '\n' ' ')
+out=$($FETCH $ids)
+check "the region count is capped so argv cannot grow without bound" "true" \
+  "$(jq -r '(.regions | length) <= 32' <<<"$out" 2>/dev/null || echo false)"
+teardown
+
+# --- history mode -----------------------------------------------------------
+#
+# History used to be fetched by curl straight from Panel.qml, which put one
+# request outside the single bounded seam the rest goes through.
+
+HIST='[{"regionId":"31","regionName":"м. Київ","alarms":[{"regionId":"31","startDate":"2026-08-27T08:00:00Z","endDate":"2026-08-27T09:00:00Z","duration":"01:00:00","alertType":"AIR","isContinue":false}]}]'
+
+setup
+body "/api/v3/alerts/regionHistory?regionId=31" "$HIST"
+out=$("$FETCH" --history 31)
+check "history mode reports ok" "true" "$(jq -r .ok <<<"$out")"
+check "the alert type comes through" "AIR" "$(jq -r '.alarms[0].alertType' <<<"$out")"
+check "the duration comes through" "01:00:00" "$(jq -r '.alarms[0].duration' <<<"$out")"
+teardown
+
+setup
+body "/api/v3/alerts/regionHistory?regionId=31" "$HIST"
+out=$("$FETCH" --history 31)
+check "history mode emits one line" "1" "$(wc -l <<<"$out")"
+teardown
+
+setup
+out=$("$FETCH" --history 'not-an-id')
+check "history refuses a non-numeric id" "false" "$(jq -r .ok <<<"$out")"
+teardown
+
+setup
+big='[{"regionId":"31","alarms":['
+for i in $(seq 1 400); do big="$big{\"alertType\":\"AIR\",\"startDate\":\"2026-08-27T08:00:00Z\",\"duration\":\"01:00:00\"},"; done
+big="${big%,}]}]"
+body "/api/v3/alerts/regionHistory?regionId=31" "$big"
+out=$("$FETCH" --history 31)
+check "history entries are capped" "true" "$(jq -r '(.alarms | length) <= 10' <<<"$out")"
+teardown
+
+setup
+out=$(CURL_EXIT=28 "$FETCH" --history 31)
+check "an unreachable history endpoint is an in-band failure" "false" "$(jq -r .ok <<<"$out")"
 teardown
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

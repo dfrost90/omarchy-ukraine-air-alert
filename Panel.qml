@@ -59,6 +59,8 @@ Panel {
   // Fetched lazily on open and cached, which keeps this comfortably inside the
   // endpoint's one-request-per-minute limit: panels are not opened four times
   // a minute.
+  readonly property int maxPayload: Model.MAX_PAYLOAD_BYTES
+
   property var history: ({})
   property double historyFetchedAt: 0
   property bool historyFailed: false
@@ -79,16 +81,22 @@ Panel {
     Process {
       property string regionId: ""
       running: true
-      command: ["curl", "-fsS", "--compressed", "--max-time", "8",
-        "https://siren.pp.ua/api/v3/alerts/regionHistory?regionId=" + regionId]
+      // Through the fetch script rather than curl directly, so this request is
+      // bounded by the same ceilings as every other one and the plugin has a
+      // single place where network data enters.
+      command: [root.script, "--history", regionId]
       stdout: StdioCollector {
         waitForEnd: true
         onStreamFinished: {
+          var raw = String(this.text || "")
+          // StdioCollector exposes no ceiling of its own, so the retained
+          // string is bounded here before anything is kept.
+          if (raw.length > root.maxPayload) { root.historyFailed = true; return }
           try {
-            var parsed = JSON.parse(String(this.text || ""))
-            var alarms = (parsed && parsed[0] && parsed[0].alarms) ? parsed[0].alarms : []
+            var parsed = JSON.parse(raw)
+            if (!parsed || parsed.ok !== true) { root.historyFailed = true; return }
             var next = root.history
-            next[parent.regionId] = alarms.slice(0, 10)
+            next[parent.regionId] = (parsed.alarms || []).slice(0, 10)
             root.history = next
             root.historyChanged()
           } catch (e) {
@@ -110,12 +118,12 @@ Panel {
   }
 
   function historyLine(entry) {
-    var type = Model.alertAbbrev(entry.alertType || "")
+    var type = Model.plain(Model.alertAbbrev(entry.alertType || ""), 32)
     var start = Date.parse(entry.startDate || "")
     var when = isNaN(start) ? "?" : Qt.formatDateTime(new Date(start), "d MMM HH:mm")
     // isContinue means the alert is still running, so a duration of zero is
     // "ongoing" rather than an instantaneous alert.
-    var dur = entry.isContinue === true ? "ongoing" : String(entry.duration || "").replace(/^00:/, "")
+    var dur = entry.isContinue === true ? "ongoing" : Model.plain(entry.duration, 24).replace(/^00:/, "")
     return when + "  " + type + "  " + dur
   }
 
@@ -142,10 +150,12 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         root.catalogLoading = false
+        var raw = String(this.text || "")
+        if (raw.length > root.maxPayload) { root.catalogFailed = true; return }
         try {
-          var parsed = JSON.parse(String(this.text || ""))
+          var parsed = JSON.parse(raw)
           if (parsed && parsed.ok && parsed.regions) {
-            root.catalog = parsed.regions
+            root.catalog = parsed.regions.slice(0, Model.MAX_CATALOG)
             root.catalogFailed = false
             root.seedQuery()
             return
@@ -179,7 +189,7 @@ Panel {
       try {
         var parsed = JSON.parse(text())
         if (parsed && parsed.name) {
-          root.query = String(parsed.name)
+          root.query = Model.plain(parsed.name, 64)
           root.pickerOpen = true
         }
       } catch (e) {}
@@ -252,7 +262,7 @@ Panel {
 
   // --- layout ----------------------------------------------------------------
 
-  readonly property int contentW: 340
+  readonly property int contentW: 380
 
   KeyboardPanel {
     id: panel
@@ -308,7 +318,7 @@ Panel {
             Text {
               width: col.width * 0.42
               elide: Text.ElideRight
-              text: modelData.label
+              text: Model.plain(modelData.label)
               textFormat: Text.PlainText
               color: parent.rowColor
               font.family: root.fontFam
@@ -386,7 +396,7 @@ Panel {
             visible: root.historyFor(modelData.id).length > 0
 
             Text {
-              text: modelData.label
+              text: Model.plain(modelData.label)
               textFormat: Text.PlainText
               color: Qt.darker(root.fg, 1.4)
               font.family: root.fontFam
@@ -406,6 +416,18 @@ Panel {
               }
             }
           }
+        }
+
+        Text {
+          visible: root.regions.length > 0
+          width: parent.width
+          text: "Unofficial indicator — rely on official alerts."
+          textFormat: Text.PlainText
+          wrapMode: Text.WordWrap
+          color: Color.muted
+          font.family: root.fontFam
+          font.pixelSize: Style.font.caption
+          font.italic: true
         }
 
         // ---- picker ----------------------------------------------------------
@@ -441,7 +463,7 @@ Panel {
             Text {
               width: col.width * 0.40
               elide: Text.ElideRight
-              text: modelData.name || modelData.id
+              text: Model.plain(modelData.name || modelData.id)
               textFormat: Text.PlainText
               color: Qt.darker(root.fg, 1.3)
               font.family: root.fontFam
@@ -451,7 +473,7 @@ Panel {
 
             TextField {
               width: col.width * 0.38
-              text: modelData.label
+              text: Model.plain(modelData.label)
               foreground: root.fg
               verticalPadding: 2
               font.pixelSize: Style.font.bodySmall
@@ -512,7 +534,7 @@ Panel {
             required property var modelData
             required property int index
             width: col.width
-            height: resultRow.implicitHeight + Style.space(4)
+            height: resultRow.implicitHeight + Style.space(6)
             radius: Style.radius.small
             // The first result is what Enter takes.
             color: index === 0 ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08) : "transparent"
@@ -523,26 +545,33 @@ Panel {
               onClicked: root.addRegion(modelData)
             }
 
-            Row {
+            Column {
               id: resultRow
               anchors.left: parent.left
+              anchors.right: parent.right
               anchors.leftMargin: Style.space(4)
+              anchors.rightMargin: Style.space(4)
               anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(6)
+              spacing: 0
 
               Text {
-                text: modelData.name
+                width: parent.width
+                elide: Text.ElideRight
+                text: Model.plain(modelData.name)
                 textFormat: Text.PlainText
                 color: root.fg
                 font.family: root.fontFam
                 font.pixelSize: Style.font.bodySmall
               }
 
-              // Львівська область and Львівський район are otherwise
-              // indistinguishable in a result list.
+              // On its own line rather than appended: Львівська область and
+              // Львівський район differ in the tail, so eliding one line would
+              // clip away the only thing telling them apart.
               Text {
+                width: parent.width
+                elide: Text.ElideRight
                 text: root.typeLabel(modelData.type)
-                  + (modelData.parent ? " · " + modelData.parent : "")
+                  + (modelData.parent ? " · " + Model.plain(modelData.parent) : "")
                 textFormat: Text.PlainText
                 color: Color.muted
                 font.family: root.fontFam

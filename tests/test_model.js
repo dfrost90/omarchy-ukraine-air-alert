@@ -154,5 +154,74 @@ check("clear pill is empty", "", M.pillText(M.aggregate(CLEAR, NOW, NOW, 60), 1,
 check("unknown pill is a question mark", "?", M.pillText(M.aggregate(CLEAR, 0, NOW, 60), 1, NOW));
 check("unconfigured pill prompts for setup", "set region", M.pillText(M.aggregate([], NOW, NOW, 60), 0, NOW));
 
+// --- bounds -----------------------------------------------------------------
+//
+// Everything below this line exists because the data crossing these functions
+// comes from a third-party host, a user-writable state file, or a shell script
+// any of them could in principle influence. Shape being right says nothing
+// about size or count, and both are drawn into long-lived QML objects.
+
+check("region ids are digits only", true, M.isRegionId("31"));
+check("an option-looking id is refused", false, M.isRegionId("--regions"));
+check("a leading dash is refused", false, M.isRegionId("-31"));
+check("a shell metacharacter is refused", false, M.isRegionId("31; rm -rf /"));
+check("an empty id is refused", false, M.isRegionId(""));
+check("an absurdly long digit string is refused", false, M.isRegionId("1".repeat(64)));
+
+// A crafted state file listing thousands of regions would spawn a process and
+// build a QML row per entry on every poll.
+const MANY = [];
+for (let i = 0; i < 5000; i++) MANY.push({ id: String(i + 1) });
+check("the region list is capped", M.MAX_REGIONS, M.resolveRegions(MANY, null).length);
+check("an invalid id is dropped rather than passed to argv",
+  ["31"], M.resolveRegions([{ id: "--regions" }, { id: "31" }], null).map(function (r) { return r.id; }));
+
+const manyAlerts = { ok: true, regions: [{ id: "1", name: "x", alerts: [] }] };
+for (let i = 0; i < 500; i++) manyAlerts.regions[0].alerts.push({ type: "AIR", since: "2026-08-27T09:00:00Z" });
+check("alerts per region are capped",
+  M.MAX_ALERTS, M.parsePayload(JSON.stringify(manyAlerts)).regions[0].alerts.length);
+
+const manyRegions = { ok: true, regions: [] };
+for (let i = 0; i < 5000; i++) manyRegions.regions.push({ id: String(i), name: "x", alerts: [] });
+check("regions in a payload are capped",
+  M.MAX_REGIONS, M.parsePayload(JSON.stringify(manyRegions)).regions.length);
+
+check("an oversized payload is refused whole, not truncated",
+  false, M.parsePayload('{"ok":true,"regions":[],"pad":"' + "A".repeat(M.MAX_PAYLOAD_BYTES) + '"}').ok);
+check("a payload exactly at the ceiling is still accepted",
+  true, M.parsePayload(JSON.stringify({ ok: true, regions: [] })).ok);
+
+const bigCatalog = [];
+for (let i = 0; i < 20000; i++) bigCatalog.push({ id: String(i), name: "Київська область", type: "State", parent: null });
+check("search never scans an unbounded catalog",
+  12, M.searchRegions(bigCatalog, "Kyiv", 12).length);
+check("search results respect the catalog cap even with a huge limit",
+  M.MAX_CATALOG >= 12, M.searchRegions(bigCatalog, "Kyiv", 999999).length <= M.MAX_CATALOG);
+
+// PanelToolTip's contentItem Text sets no textFormat, so it inherits AutoText:
+// a region name is attacker-influenced data reaching a markup-interpreting sink.
+check("markup delimiters are stripped so no tag survives", "bimg src=x", M.plain("<b><img src=x>"));
+check("plain truncates", 16, M.plain("A".repeat(500), 16).length);
+check("plain handles a non-string", "", M.plain(null));
+check("plain handles a number", "31", M.plain(31));
+check("a label is sanitised on the way out of resolveRegions",
+  -1, M.resolveRegions([{ id: "1", label: "<img src=x>" }], null)[0].label.indexOf("<"));
+check("a name is sanitised on the way out of parsePayload",
+  -1, M.parsePayload('{"ok":true,"regions":[{"id":"1","name":"<b>x</b>","alerts":[]}]}')
+        .regions[0].name.indexOf("<"));
+
+// --- backoff ----------------------------------------------------------------
+//
+// siren.pp.ua returns 429 after roughly five requests in quick succession.
+// A widget that keeps polling at a fixed interval through a refusal is both
+// rude and useless, so failures widen the interval until one succeeds.
+
+check("no failures polls at the base interval", 15, M.pollInterval(15, 0));
+check("one failure doubles it", 30, M.pollInterval(15, 1));
+check("two failures double again", 60, M.pollInterval(15, 2));
+check("backoff is capped", M.MAX_POLL_INTERVAL, M.pollInterval(15, 20));
+check("a slow base interval is still capped", M.MAX_POLL_INTERVAL, M.pollInterval(600, 5));
+check("a negative failure count is treated as none", 15, M.pollInterval(15, -3));
+
 console.log("\n" + pass + " passed, " + fail + " failed");
 process.exit(fail === 0 ? 0 : 1);

@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "dfrost",
   "license": "MIT",
-  "description": "Air raid alert status for selected regions of Ukraine, from the keyless siren.pp.ua mirror of the official UkraineAlarm API.",
+  "description": "Air raid alert status for selected regions of Ukraine, from the keyless siren.pp.ua mirror of the official UkraineAlarm API. Unofficial and passive: no notifications, no sound. Not a life-safety system.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,9 +14,10 @@
   },
   "barWidget": {
     "displayName": "Air Alert",
-    "description": "Air raid alert status for selected Ukrainian regions. Click to pick regions and see history.",
+    "description": "Air raid alert status for selected Ukrainian regions. Unofficial indicator — not a life-safety system.",
     "category": "Info",
     "allowMultiple": false,
     "defaultSection": "right"
-  }
+  },
+  "homepage": "https://github.com/dfrost90/omarchy-air-alert"
 }

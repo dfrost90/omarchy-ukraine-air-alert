@@ -86,7 +86,8 @@ function searchRegions(regions, query, limit) {
   var max = limit || 20;
   var exact = [], prefix = [], contains = [];
   var list = regions || [];
-  for (var i = 0; i < list.length; i++) {
+  var scan = Math.min(list.length, MAX_CATALOG);
+  for (var i = 0; i < scan; i++) {
     var r = list[i];
     if (!r) continue;
     // Communities are addressable by id through shell.json but stay out of the
@@ -133,6 +134,56 @@ function defaultLabel(name, type) {
   return latin + suffix;
 }
 
+// --- bounds -----------------------------------------------------------------
+//
+// The data crossing this file arrives from a third-party host, from a
+// user-writable state file, or from a shell script either could influence.
+// Shape being right says nothing about size or count, and every value below
+// ends up in a long-lived QML object — one row, one Process, one Text apiece.
+
+// The real catalog holds 151 State/District regions; nobody watches more than
+// a handful. Each configured region costs an argv entry and a QML row.
+var MAX_REGIONS = 32;
+// Six alert types exist. More than this on one region is not real data.
+var MAX_ALERTS = 16;
+// 151 today. Bounded well above any plausible administrative reform, but
+// bounded, because search walks the whole list on every keystroke.
+var MAX_CATALOG = 4096;
+// The largest real poll response is a few hundred bytes; the ceiling is for a
+// host that has stopped behaving.
+var MAX_PAYLOAD_BYTES = 262144;
+var MAX_TEXT = 120;
+
+// Region ids reach argv. An id of "--regions" would flip the fetch script into
+// another mode; anything non-numeric has no business being one at all.
+function isRegionId(value) {
+  return /^[0-9]{1,12}$/.test(String(value === undefined || value === null ? "" : value));
+}
+
+// Ui/PanelToolTip.qml's contentItem Text sets no textFormat and therefore
+// inherits AutoText, as do Ui/Button.qml and Ui/WidgetButton.qml. Region names
+// come off the network, so every string bound for one of those sinks is
+// stripped and truncated here rather than trusted.
+function plain(value, maxLen) {
+  var s = String(value === undefined || value === null ? "" : value);
+  s = s.replace(/[<>&]/g, "");
+  var cap = maxLen || MAX_TEXT;
+  return s.length > cap ? s.substring(0, cap) : s;
+}
+
+// The upstream mirror answers 429 after roughly five requests in quick
+// succession. Polling straight through a refusal at a fixed interval is both
+// impolite and pointless, so each consecutive failure doubles the wait until
+// something succeeds and resets it.
+var MAX_POLL_INTERVAL = 300;
+
+function pollInterval(baseSeconds, consecutiveFailures) {
+  var n = consecutiveFailures > 0 ? consecutiveFailures : 0;
+  if (n > 16) n = 16;
+  var seconds = baseSeconds * Math.pow(2, n);
+  return seconds > MAX_POLL_INTERVAL ? MAX_POLL_INTERVAL : seconds;
+}
+
 // --- payload ----------------------------------------------------------------
 
 // fetch-alerts promises one line of JSON, always. Anything else — a crash, an
@@ -140,9 +191,16 @@ function defaultLabel(name, type) {
 // allowed to throw inside a QML property binding.
 function parsePayload(text) {
   var bad = { ok: false, unchanged: false, lastActionIndex: "", regions: [], error: "" };
+  var source = String(text || "");
+  // Refused whole rather than truncated: a truncated prefix of a hostile
+  // payload can still parse as valid JSON and be believed.
+  if (source.length > MAX_PAYLOAD_BYTES) {
+    bad.error = "response too large";
+    return bad;
+  }
   var raw;
   try {
-    raw = JSON.parse(String(text || ""));
+    raw = JSON.parse(source);
   } catch (e) {
     bad.error = "unparseable response";
     return bad;
@@ -158,17 +216,19 @@ function parsePayload(text) {
 
   var regions = [];
   var src = raw.regions || [];
-  for (var i = 0; i < src.length; i++) {
+  var limit = Math.min(src.length, MAX_REGIONS);
+  for (var i = 0; i < limit; i++) {
     var r = src[i] || {};
     var alerts = [];
     var as = r.alerts || [];
-    for (var j = 0; j < as.length; j++) {
-      alerts.push({ type: String(as[j].type || ""), since: String(as[j].since || "") });
+    var alertLimit = Math.min(as.length, MAX_ALERTS);
+    for (var j = 0; j < alertLimit; j++) {
+      alerts.push({ type: plain(as[j].type, 32), since: plain(as[j].since, 40) });
     }
     regions.push({
       id: String(r.id || ""),
-      name: String(r.name || ""),
-      nameEn: String(r.nameEn || ""),
+      name: plain(r.name),
+      nameEn: plain(r.nameEn),
       alerts: alerts
     });
   }
@@ -190,16 +250,19 @@ function resolveRegions(shellRegions, stateRegions) {
   var src = (shellRegions && shellRegions.length) ? shellRegions
     : ((stateRegions && stateRegions.length) ? stateRegions : []);
   var out = [];
-  for (var i = 0; i < src.length; i++) {
+  for (var i = 0; i < src.length && out.length < MAX_REGIONS; i++) {
     var r = src[i] || {};
-    if (r.id === undefined || r.id === null || String(r.id) === "") continue;
-    var name = String(r.name || "");
+    // Dropped rather than clamped: a region id we cannot vouch for must never
+    // reach argv, and guessing what was meant would be worse than ignoring it.
+    if (!isRegionId(r.id)) continue;
+    var name = plain(r.name);
     var type = String(r.type || "State");
+    if (type !== "State" && type !== "District" && type !== "Community") type = "State";
     out.push({
       id: String(r.id),
       name: name,
       type: type,
-      label: String(r.label || (name ? defaultLabel(name, type) : String(r.id))),
+      label: plain(r.label || (name ? defaultLabel(name, type) : String(r.id))),
       alerts: []
     });
   }
@@ -277,6 +340,14 @@ if (typeof module !== "undefined") {
     stemQuery: stemQuery,
     searchRegions: searchRegions,
     defaultLabel: defaultLabel,
+    isRegionId: isRegionId,
+    plain: plain,
+    MAX_REGIONS: MAX_REGIONS,
+    MAX_ALERTS: MAX_ALERTS,
+    MAX_CATALOG: MAX_CATALOG,
+    MAX_PAYLOAD_BYTES: MAX_PAYLOAD_BYTES,
+    pollInterval: pollInterval,
+    MAX_POLL_INTERVAL: MAX_POLL_INTERVAL,
     parsePayload: parsePayload,
     resolveRegions: resolveRegions,
     aggregate: aggregate,
