@@ -164,8 +164,8 @@ All optional. Pinning `regions` in `shell.json` overrides the picker.
     { "id": "31", "label": "Kyiv" },
     { "id": "36", "label": "Vinnytskyi" }
   ],
-  "pollSeconds": 15,
-  "staleAfterSeconds": 60,
+  "pollSeconds": 90,
+  "staleAfterSeconds": 180,
   "icon": "󰀦"
 }
 ```
@@ -173,8 +173,8 @@ All optional. Pinning `regions` in `shell.json` overrides the picker.
 | Key | Default | Meaning |
 |---|---|---|
 | `regions` | *(picker)* | Pinned regions, max 32. Overrides the picker's saved choice. |
-| `pollSeconds` | `15` | Poll interval. Minimum 5. |
-| `staleAfterSeconds` | `60` | How long without a successful fetch before the data counts as stale. Floored at `pollSeconds * 2`. |
+| `pollSeconds` | `90` | Poll interval in seconds. Minimum 10. |
+| `staleAfterSeconds` | `60` | How long without a successful fetch before the data counts as stale. Floored at `pollSeconds * 2`, so 180s at the default interval. |
 | `icon` | `󰀦` | Bar glyph. |
 
 Region ids: `./scripts/fetch-alerts --regions | jq -r '.regions[] | "\(.id)\t\(.name)"'`
@@ -200,12 +200,17 @@ click forces a refresh.
 
 ## How it polls
 
-Most ticks cost one ~38-byte request to `/api/v3/alerts/status`, which returns
-a single integer that changes whenever anything changes anywhere in Ukraine.
-Only when that integer moves does the widget fetch the watched regions.
+Every 90 seconds by default, and most ticks cost exactly one ~38-byte request
+to `/api/v3/alerts/status` — a single integer that changes whenever anything
+changes anywhere in Ukraine. Only when that integer moves does the widget fetch
+the watched regions.
 
-Steady state is about 4 tiny requests per minute rather than 16 — worth being
-polite about, since this runs 24/7 against a free community service.
+Steady state is therefore well under one request per minute. That matters
+because this runs 24/7 against a free community service someone else pays for.
+
+The trade is that an alert can be up to 90 seconds old before the pill changes.
+That is deliberate: this is a passive indicator you glance at, not something
+you find out from — see the disclaimer.
 
 The mirror answers `429` after roughly five requests in quick succession, so
 consecutive failures double the poll interval (capped at 5 minutes) until one

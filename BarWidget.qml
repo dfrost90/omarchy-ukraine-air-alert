@@ -28,7 +28,10 @@ BarWidget {
   // rich-text-parse a crafted settings value.
   readonly property string icon: Model.plain(setting("icon", "󰀦"), 8)
 
-  readonly property int pollSeconds: Math.max(5, setting("pollSeconds", 15))
+  // 90s by default. This is a passive glance indicator, not a notification
+  // system, so a alert showing up to a minute and a half late costs nothing --
+  // and it keeps a free community service at well under one request a minute.
+  readonly property int pollSeconds: Math.max(10, setting("pollSeconds", 90))
   // Staleness has to outlast at least a couple of missed ticks, or a single
   // dropped request would flip the pill to unknown on a flaky connection.
   readonly property int staleAfterSeconds:
