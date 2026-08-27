@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.dfrost90.air-alert",
+  "name": "Air Alert",
+  "version": "1.0.0",
+  "author": "dfrost",
+  "license": "MIT",
+  "description": "Air raid alert status for selected regions of Ukraine, from the keyless siren.pp.ua mirror of the official UkraineAlarm API.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Air Alert",
+    "description": "Air raid alert status for selected Ukrainian regions. Click to pick regions and see history.",
+    "category": "Info",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
