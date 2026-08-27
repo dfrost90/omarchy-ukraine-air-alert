@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+# Tests for fetch-alerts. curl is stubbed with a script that serves canned
+# bodies from a sandbox keyed by the requested path, so no request ever leaves
+# the machine and every failure mode is reproducible. The stub records its full
+# argv, which is what the flag assertions read.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FETCH="$SCRIPT_DIR/scripts/fetch-alerts"
+
+pass=0
+fail=0
+
+check() {
+  local name="$1" expected="$2" actual="$3"
+  if [ "$expected" = "$actual" ]; then
+    pass=$((pass + 1)); printf '  ok   %s\n' "$name"
+  else
+    fail=$((fail + 1))
+    printf '  FAIL %s\n       expected: %s\n       actual:   %s\n' "$name" "$expected" "$actual"
+  fi
+}
+
+check_contains() {
+  local name="$1" needle="$2" haystack="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    pass=$((pass + 1)); printf '  ok   %s\n' "$name"
+  else
+    fail=$((fail + 1))
+    printf '  FAIL %s\n       expected to contain: %s\n       actual: %s\n' "$name" "$needle" "$haystack"
+  fi
+}
+
+setup() {
+  SANDBOX="$(mktemp -d)"
+  BODIES="$SANDBOX/bodies"; mkdir -p "$BODIES"
+  CURL_LOG="$SANDBOX/curl.log"
+  CURL_ARGS="$SANDBOX/curl.args"
+  CURL_EXIT=0
+
+  cat >"$SANDBOX/curl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CURL_ARGS"
+url="${@: -1}"
+printf '%s\n' "$url" >>"$CURL_LOG"
+if [ "${CURL_EXIT:-0}" != "0" ]; then exit "$CURL_EXIT"; fi
+slug=$(printf '%s' "${url#*siren.pp.ua}" | tr '/?=&' '____')
+if [ -f "$BODIES/$slug" ]; then cat "$BODIES/$slug"; exit 0; fi
+exit 22
+STUB
+  chmod +x "$SANDBOX/curl"
+
+  export AIR_ALERT_CURL="$SANDBOX/curl"
+  export AIR_ALERT_CACHE_DIR="$SANDBOX/cache"
+  export AIR_ALERT_API_BASE="https://siren.pp.ua"
+  export BODIES CURL_LOG CURL_ARGS CURL_EXIT
+}
+
+body() { printf '%s' "$2" >"$BODIES/$(printf '%s' "$1" | tr '/?=&' '____')"; }
+
+teardown() { [ -n "${SANDBOX:-}" ] && rm -rf "$SANDBOX"; }
+
+ALERTING='[{"regionId":"36","regionType":"District","regionName":"Вінницький район","regionEngName":"Vinnytskyi district","lastUpdate":"2026-08-27T08:39:52Z","activeAlerts":[{"regionId":"36","regionType":"District","type":"AIR","lastUpdate":"2026-08-27T08:39:52Z"}]}]'
+CLEARBODY='[{"regionId":"81","regionType":"District","regionName":"Кропивницький район","regionEngName":"Kropyvnytskyi district","lastUpdate":"2026-08-27T08:35:06Z","activeAlerts":[]}]'
+
+# --- poll mode --------------------------------------------------------------
+
+setup
+body "/api/v3/alerts/36" "$ALERTING"
+out=$("$FETCH" 36)
+check "a successful poll reports ok" "true" "$(jq -r .ok <<<"$out")"
+check "the alert type is carried through" "AIR" "$(jq -r '.regions[0].alerts[0].type' <<<"$out")"
+check "the start time comes from the alert's lastUpdate" \
+  "2026-08-27T08:39:52Z" "$(jq -r '.regions[0].alerts[0].since' <<<"$out")"
+check "the ukrainian name is carried through" \
+  "Вінницький район" "$(jq -r '.regions[0].name' <<<"$out")"
+check "the english name is carried through" \
+  "Vinnytskyi district" "$(jq -r '.regions[0].nameEn' <<<"$out")"
+teardown
+
+setup
+body "/api/v3/alerts/81" "$CLEARBODY"
+out=$("$FETCH" 81)
+check "a clear region reports ok with no alerts" "0" "$(jq -r '.regions[0].alerts | length' <<<"$out")"
+check "and is not marked as an error" "false" "$(jq -r '.regions[0] | has("error")' <<<"$out")"
+teardown
+
+setup
+body "/api/v3/alerts/36" "$ALERTING"
+body "/api/v3/alerts/81" "$CLEARBODY"
+out=$("$FETCH" 36 81)
+check "several regions come back in the order asked" \
+  "36 81" "$(jq -r '[.regions[].id] | join(" ")' <<<"$out")"
+teardown
+
+setup
+body "/api/v3/alerts/36" "$ALERTING"
+out=$("$FETCH" 36)
+check "output is always exactly one line" "1" "$(wc -l <<<"$out")"
+teardown
+
+# --- the status gate --------------------------------------------------------
+
+setup
+body "/api/v3/alerts/status" '{"lastActionIndex":639234179467755632}'
+body "/api/v3/alerts/36" "$ALERTING"
+out=$("$FETCH" --since 639234179467755632 36)
+check "an unchanged index short-circuits" "true" "$(jq -r .unchanged <<<"$out")"
+check "and costs exactly one request" "1" "$(wc -l <"$CURL_LOG")"
+teardown
+
+setup
+body "/api/v3/alerts/status" '{"lastActionIndex":639234179467755999}'
+body "/api/v3/alerts/36" "$ALERTING"
+out=$("$FETCH" --since 639234179467755632 36)
+check "a changed index escalates to a full fetch" "false" "$(jq -r '.unchanged' <<<"$out")"
+check "the new index is reported back" "639234179467755999" "$(jq -r .lastActionIndex <<<"$out")"
+check "and the region data came with it" "AIR" "$(jq -r '.regions[0].alerts[0].type' <<<"$out")"
+teardown
+
+setup
+body "/api/v3/alerts/36" "$ALERTING"
+"$FETCH" 36 >/dev/null
+check "no --since means no status request at all" \
+  "0" "$(grep -c 'alerts/status' "$CURL_LOG")"
+teardown
+
+setup
+body "/api/v3/alerts/36" "$ALERTING"
+out=$("$FETCH" --since 12345 36)
+check "an unreachable status endpoint is a failure, not a silent full fetch" \
+  "false" "$(jq -r .ok <<<"$out")"
+teardown
+
+# --- failure is in-band -----------------------------------------------------
+
+setup
+out=$(CURL_EXIT=28 "$FETCH" 36); rc=$?
+check "a curl failure still exits 0" "0" "$rc"
+check "a curl failure reports ok:false" "false" "$(jq -r .ok <<<"$out")"
+check "a failed fetch still emits valid JSON" "ok" "$(jq -e . <<<"$out" >/dev/null 2>&1 && echo ok)"
+teardown
+
+setup
+body "/api/v3/alerts/36" 'not json at all'
+out=$("$FETCH" 36)
+check "a non-JSON body is a failure, not a crash" "false" "$(jq -r .ok <<<"$out")"
+teardown
+
+setup
+body "/api/v3/alerts/36" "$ALERTING"
+out=$("$FETCH" 36 999)
+check "one bad region id does not blind the others" "AIR" \
+  "$(jq -r '.regions[] | select(.id=="36") | .alerts[0].type' <<<"$out")"
+check "and the bad one is marked" "true" \
+  "$(jq -r '.regions[] | select(.id=="999") | has("error")' <<<"$out")"
+check "the payload as a whole is still ok" "true" "$(jq -r .ok <<<"$out")"
+teardown
+
+setup
+out=$("$FETCH" 998 999)
+check "every region failing is a failed fetch, not an all-clear" \
+  "false" "$(jq -r .ok <<<"$out")"
+teardown
+
+setup
+out=$("$FETCH")
+check "no region ids is a usage failure, in-band" "false" "$(jq -r .ok <<<"$out")"
+teardown
+
+setup
+out=$("$FETCH" --bogus 36)
+check "an unknown option is a usage failure, in-band" "false" "$(jq -r .ok <<<"$out")"
+teardown
+
+setup
+out=$("$FETCH" --timeout abc 36)
+check "a non-numeric timeout is refused" "false" "$(jq -r .ok <<<"$out")"
+teardown
+
+setup
+body "/api/v3/alerts/36" "$ALERTING"
+"$FETCH" --timeout 3 36 >/dev/null
+check_contains "the timeout reaches curl" "--max-time 3" "$(cat "$CURL_ARGS")"
+teardown
+
+setup
+body "/api/v3/alerts/36" "$ALERTING"
+"$FETCH" 36 >/dev/null
+check_contains "the default timeout is 8s" "--max-time 8" "$(cat "$CURL_ARGS")"
+teardown
+
+# --- regions mode -----------------------------------------------------------
+
+TREE='{"states":[{"regionId":"14","regionName":"Київська область","regionType":"State","regionChildIds":[{"regionId":"76","regionName":"Обухівський район","regionType":"District","regionChildIds":[{"regionId":"761","regionName":"Тестова громада","regionType":"Community"}]}]},{"regionId":"31","regionName":"м. Київ","regionType":"State"}]}'
+
+setup
+body "/api/v3/regions" "$TREE"
+out=$("$FETCH" --regions)
+check "regions mode reports ok" "true" "$(jq -r .ok <<<"$out")"
+check "the tree is flattened to states and districts" \
+  "14 76 31" "$(jq -r '[.regions[].id] | join(" ")' <<<"$out")"
+check "communities are dropped" "0" \
+  "$(jq '[.regions[] | select(.type=="Community")] | length' <<<"$out")"
+check "a district carries its parent oblast" \
+  "Київська область" "$(jq -r '.regions[] | select(.id=="76") | .parent' <<<"$out")"
+check "a state has no parent" "null" \
+  "$(jq -r '.regions[] | select(.id=="31") | .parent' <<<"$out")"
+check "regions mode emits one line" "1" "$(wc -l <<<"$out")"
+teardown
+
+setup
+body "/api/v3/regions" "$TREE"
+"$FETCH" --regions >/dev/null
+check "the tree is cached to disk" "ok" \
+  "$([ -f "$AIR_ALERT_CACHE_DIR/regions.json" ] && echo ok)"
+teardown
+
+setup
+body "/api/v3/regions" "$TREE"
+"$FETCH" --regions >/dev/null
+: >"$CURL_LOG"
+"$FETCH" --regions >/dev/null
+check "a warm cache costs no request" "0" "$(wc -l <"$CURL_LOG")"
+teardown
+
+setup
+body "/api/v3/regions" "$TREE"
+"$FETCH" --regions >/dev/null
+touch -d '8 days ago' "$AIR_ALERT_CACHE_DIR/regions.json"
+: >"$CURL_LOG"
+"$FETCH" --regions >/dev/null
+check "a cache past its TTL is refetched" "1" "$(wc -l <"$CURL_LOG")"
+teardown
+
+setup
+body "/api/v3/regions" "$TREE"
+"$FETCH" --regions >/dev/null
+out=$(CURL_EXIT=28 "$FETCH" --regions --force)
+check "a stale cache is served when the network is down" "true" "$(jq -r .ok <<<"$out")"
+check "and it is marked as cached" "true" "$(jq -r '.cached' <<<"$out")"
+teardown
+
+setup
+out=$(CURL_EXIT=28 "$FETCH" --regions)
+check "no cache and no network is an in-band failure" "false" "$(jq -r .ok <<<"$out")"
+teardown
+
+setup
+body "/api/v3/regions" 'not json'
+out=$("$FETCH" --regions)
+check "an unparseable tree is an in-band failure" "false" "$(jq -r .ok <<<"$out")"
+teardown
+
+printf '\n%d passed, %d failed\n' "$pass" "$fail"
+
+echo
+echo "model:"
+if command -v node >/dev/null 2>&1; then
+  node "$SCRIPT_DIR/tests/test_model.js" || fail=$((fail + 1))
+else
+  echo "  skipped — no node to run Model.js against"
+fi
+
+[ "$fail" -eq 0 ]

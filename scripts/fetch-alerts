@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# All network access for the air-alert widget.
+#
+# The contract the widget relies on: this always exits 0 and always prints
+# exactly one line of JSON. A failure is reported inside the payload as
+# {"ok":false,"error":...} so the QML side has a single parse path and never
+# has to branch on an exit code inside a property binding.
+#
+# Two modes:
+#   fetch-alerts [--since IDX] [--timeout N] <regionId>...   poll for alerts
+#   fetch-alerts --regions [--force] [--timeout N]           the region catalog
+
+set -uo pipefail
+
+API_BASE="${AIR_ALERT_API_BASE:-https://siren.pp.ua}"
+CURL="${AIR_ALERT_CURL:-curl}"
+CACHE_DIR="${AIR_ALERT_CACHE_DIR:-$HOME/.cache/omarchy/air-alert}"
+CACHE_FILE="$CACHE_DIR/regions.json"
+CACHE_TTL=$((7 * 24 * 3600))
+
+TIMEOUT=8
+SINCE=""
+MODE="poll"
+FORCE=0
+REGIONS=()
+
+die_json() { jq -cn --arg e "$1" '{ok:false,error:$e}'; exit 0; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --since)   SINCE="${2:-}"; shift 2 ;;
+    --timeout) TIMEOUT="${2:-8}"; shift 2 ;;
+    --regions) MODE="regions"; shift ;;
+    --force)   FORCE=1; shift ;;
+    -*)        die_json "unknown option: $1" ;;
+    *)         REGIONS+=("$1"); shift ;;
+  esac
+done
+
+[[ "$TIMEOUT" =~ ^[0-9]+$ ]] || die_json "timeout must be a whole number"
+
+get() {
+  "$CURL" -fsS --compressed --max-time "$TIMEOUT" "$API_BASE$1" 2>/dev/null
+}
+
+# --- poll -------------------------------------------------------------------
+
+if [ "$MODE" = "poll" ]; then
+  [ "${#REGIONS[@]}" -gt 0 ] || die_json "no region ids given"
+
+  index=""
+  if [ -n "$SINCE" ]; then
+    # One ~45-byte request that says whether anything changed anywhere in
+    # Ukraine. Most ticks stop here.
+    status=$(get "/api/v3/alerts/status")
+    [ -n "$status" ] || die_json "curl failed fetching status"
+    index=$(jq -r '.lastActionIndex // empty' <<<"$status" 2>/dev/null)
+    [ -n "$index" ] || die_json "unparseable status response"
+    if [ "$index" = "$SINCE" ]; then
+      jq -cn --arg i "$index" \
+        '{ok:true,unchanged:true,lastActionIndex:$i,fetchedAt:(now|floor),regions:[]}'
+      exit 0
+    fi
+  fi
+
+  out="[]"
+  for id in "${REGIONS[@]}"; do
+    body=$(get "/api/v3/alerts/$id")
+    if [ -z "$body" ]; then
+      out=$(jq -c --arg id "$id" \
+        '. + [{id:$id,name:"",nameEn:"",alerts:[],error:"unreachable"}]' <<<"$out")
+      continue
+    fi
+    # A clear region still comes back as an object with an empty activeAlerts,
+    # so absence never has to be inferred.
+    region=$(jq -c --arg id "$id" '
+      (.[0] // {}) as $r
+      | { id: $id,
+          name: ($r.regionName // ""),
+          nameEn: ($r.regionEngName // ""),
+          alerts: [ ($r.activeAlerts // [])[]
+                    | {type: (.type // ""), since: (.lastUpdate // "")} ] }
+    ' <<<"$body" 2>/dev/null)
+    if [ -z "$region" ]; then
+      out=$(jq -c --arg id "$id" \
+        '. + [{id:$id,name:"",nameEn:"",alerts:[],error:"unparseable"}]' <<<"$out")
+      continue
+    fi
+    out=$(jq -c --argjson r "$region" '. + [$r]' <<<"$out")
+  done
+
+  # If every region failed, the fetch as a whole failed. A wall of unreachable
+  # regions must never read to the widget as an all-clear.
+  total=$(jq 'length' <<<"$out")
+  bad=$(jq '[.[] | select(has("error"))] | length' <<<"$out")
+  if [ "$total" -gt 0 ] && [ "$total" = "$bad" ]; then
+    die_json "could not reach any region"
+  fi
+
+  jq -cn --argjson r "$out" --arg i "$index" \
+    '{ok:true,unchanged:false,lastActionIndex:$i,fetchedAt:(now|floor),regions:$r}'
+  exit 0
+fi
+
+# --- regions ----------------------------------------------------------------
+
+flatten() {
+  # Named flat_walk rather than walk: jq has a builtin walk/1 at the same
+  # arity, and shadowing it here would be gratuitously confusing.
+  jq -c '
+    def flat_walk($parent):
+      . as $n
+      | ( if ($n.regionType == "State" or $n.regionType == "District")
+          then [{ id: ($n.regionId|tostring),
+                  name: ($n.regionName // ""),
+                  type: $n.regionType,
+                  parent: $parent }]
+          else [] end )
+        + ( [ ($n.regionChildIds // [])[]
+              | flat_walk(if $n.regionType == "State"
+                          then ($n.regionName // "") else $parent end) ]
+            | add // [] );
+    { ok: true, cached: false,
+      regions: ([ (.states // [])[] | flat_walk(null) ] | add // []) }
+  '
+}
+
+# Region ids and names change on the order of never, so a week is a
+# conservative TTL and a warm cache costs no request at all.
+if [ "$FORCE" != "1" ] && [ -f "$CACHE_FILE" ]; then
+  age=$(( $(date +%s) - $(stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0) ))
+  if [ "$age" -lt "$CACHE_TTL" ]; then
+    cat "$CACHE_FILE"
+    exit 0
+  fi
+fi
+
+serve_stale_or_die() {
+  # Losing the network must not lose the region list we already had: a stale
+  # catalog is strictly better than no picker, and selection being unavailable
+  # must never take down alert monitoring.
+  if [ -f "$CACHE_FILE" ]; then
+    jq -c '. + {cached:true}' "$CACHE_FILE"
+    exit 0
+  fi
+  die_json "$1"
+}
+
+tree=$(get "/api/v3/regions")
+[ -n "$tree" ] || serve_stale_or_die "curl failed fetching the region tree"
+
+flat=$(flatten <<<"$tree" 2>/dev/null)
+[ -n "$flat" ] || serve_stale_or_die "unparseable region tree"
+
+mkdir -p "$CACHE_DIR"
+printf '%s\n' "$flat" >"$CACHE_FILE"
+printf '%s\n' "$flat"
+exit 0
