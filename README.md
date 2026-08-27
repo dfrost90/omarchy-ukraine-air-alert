@@ -1,10 +1,10 @@
-# Air Alert
+# Ukraine Air Alert
 
 An Omarchy bar widget showing whether an air raid alert is active in the
 regions of Ukraine you care about, which type it is, and how long it has been
 running.
 
-![Air Alert](preview.png)
+![Ukraine Air Alert](preview.png)
 
 ---
 
@@ -62,7 +62,7 @@ Alert types reported: `AIR`, `ARTILLERY`, `URBAN_FIGHTS`, `CHEMICAL`,
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/dfrost90/omarchy-air-alert.git --enable
+omarchy plugin add https://github.com/dfrost90/omarchy-ukraine-air-alert.git --enable
 ```
 
 Then put it on the bar:

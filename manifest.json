@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "io.github.dfrost90.air-alert",
-  "name": "Air Alert",
+  "name": "Ukraine Air Alert",
   "version": "1.0.0",
   "author": "dfrost",
   "license": "MIT",
@@ -13,11 +13,11 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "Air Alert",
+    "displayName": "Ukraine Air Alert",
     "description": "Air raid alert status for selected Ukrainian regions. Unofficial indicator — not a life-safety system.",
     "category": "Info",
     "allowMultiple": false,
     "defaultSection": "right"
   },
-  "homepage": "https://github.com/dfrost90/omarchy-air-alert"
+  "homepage": "https://github.com/dfrost90/omarchy-ukraine-air-alert"
 }
