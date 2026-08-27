@@ -118,7 +118,16 @@ function defaultLabel(name, type) {
   var s = String(name || "").trim();
   s = s.replace(/^м\.\s*/, "");
   var suffix = "";
-  if (/\s+область$/.test(s)) {
+  // "Харків та Харківська територіальна громада" is one entry covering a city
+  // and its hromada. Everything after "та" restates the city, so the city
+  // alone is both shorter and clearer.
+  var joined = s.split(/\s+та\s+/);
+  if (joined.length > 1) {
+    s = joined[0];
+  } else if (/\s+територіальна\s+громада$/.test(s)) {
+    suffix = " hr.";
+    s = s.replace(/\s+територіальна\s+громада$/, "");
+  } else if (/\s+область$/.test(s)) {
     suffix = " obl.";
     s = s.replace(/\s+область$/, "");
   } else if (/\s+район$/.test(s)) {
@@ -131,7 +140,8 @@ function defaultLabel(name, type) {
   latin = latin.replace(/(^|[\s\-])([a-z])/g, function (m, sep, ch) {
     return sep + ch.toUpperCase();
   });
-  return latin + suffix;
+  var out = latin + suffix;
+  return out.length > MAX_LABEL ? out.substring(0, MAX_LABEL) : out;
 }
 
 // --- bounds -----------------------------------------------------------------
@@ -153,6 +163,10 @@ var MAX_CATALOG = 4096;
 // host that has stopped behaving.
 var MAX_PAYLOAD_BYTES = 262144;
 var MAX_TEXT = 120;
+// A bar pill has to share a 3440px strip with everything else. Labels are
+// capped here as well as elided in the widget, so a long one never becomes a
+// wall of text that elides down to nothing useful.
+var MAX_LABEL = 24;
 
 // Region ids reach argv. An id of "--regions" would flip the fetch script into
 // another mode; anything non-numeric has no business being one at all.
@@ -311,7 +325,7 @@ function relabelIn(list, id, label) {
   var out = copySelection(list);
   for (var i = 0; i < out.length; i++) {
     if (out[i].id !== String(id)) continue;
-    var next = plain(label);
+    var next = plain(label, MAX_LABEL);
     // An emptied field falls back to the derived name rather than leaving a
     // blank pill that says nothing about which region it is.
     out[i].label = next !== "" ? next
@@ -409,6 +423,25 @@ function alertAbbrev(type) {
   return ABBREV.hasOwnProperty(t) ? ABBREV[t] : t;
 }
 
+// The region label, drawn separately so it can elide on its own.
+function pillRegionLabel(agg, regionCount) {
+  if (!agg || agg.status !== "alert" || !agg.primary) return "";
+  return regionCount > 1 ? plain(agg.primary.region.label, MAX_LABEL) : "";
+}
+
+// Type and elapsed time. Never elided: this is the part worth reading.
+function pillStatus(agg, nowMs) {
+  if (!agg) return "";
+  if (agg.status === "unconfigured") return "set region";
+  if (agg.status === "unknown") return "?";
+  if (agg.status !== "alert" || !agg.primary) return "";
+  var elapsed = formatElapsed(agg.primary.alert.since, nowMs);
+  var body = alertAbbrev(agg.primary.alert.type) + (elapsed ? " " + elapsed : "");
+  // A tilde marks a value extrapolated from the last successful fetch rather
+  // than one just confirmed.
+  return agg.stale ? "~" + body : body;
+}
+
 function pillText(agg, regionCount, nowMs) {
   if (!agg) return "";
   if (agg.status === "unconfigured") return "set region";
@@ -432,6 +465,7 @@ if (typeof module !== "undefined") {
     defaultLabel: defaultLabel,
     isRegionId: isRegionId,
     plain: plain,
+    MAX_LABEL: MAX_LABEL,
     MAX_REGIONS: MAX_REGIONS,
     MAX_ALERTS: MAX_ALERTS,
     MAX_CATALOG: MAX_CATALOG,
@@ -450,6 +484,8 @@ if (typeof module !== "undefined") {
     formatElapsed: formatElapsed,
     formatDuration: formatDuration,
     alertAbbrev: alertAbbrev,
+    pillRegionLabel: pillRegionLabel,
+    pillStatus: pillStatus,
     pillText: pillText
   };
 }

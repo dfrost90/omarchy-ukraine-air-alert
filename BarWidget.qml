@@ -31,6 +31,11 @@ BarWidget {
   // 90s by default. This is a passive glance indicator, not a notification
   // system, so a alert showing up to a minute and a half late costs nothing --
   // and it keeps a free community service at well under one request a minute.
+  // A hard ceiling on how much bar the pill may take, regardless of what any
+  // label says. Elision is the backstop for a hand-edited label; the derived
+  // ones are already short.
+  readonly property int maxLabelWidth: Math.max(40, setting("maxLabelWidth", 110))
+
   readonly property int pollSeconds: Math.max(10, setting("pollSeconds", 90))
   // Staleness has to outlast at least a couple of missed ticks, or a single
   // dropped request would flip the pill to unknown on a flaky connection.
@@ -61,11 +66,13 @@ BarWidget {
   // QML then reports every frame. Everything below is recomputed explicitly
   // from the few places that can actually change it.
   property var agg: ({ status: "unconfigured", stale: false, primary: null })
-  property string pillLabel: ""
+  property string pillRegion: ""
+  property string pillStatus: ""
 
   function recompute() {
     agg = Model.aggregate(activeRegions, lastOkFetch, tick, staleAfterSeconds)
-    pillLabel = Model.plain(Model.pillText(agg, regions.length, tick), 48)
+    pillRegion = Model.pillRegionLabel(agg, regions.length)
+    pillStatus = Model.pillStatus(agg, tick)
   }
 
   onTickChanged: recompute()
@@ -276,7 +283,7 @@ BarWidget {
     // The glyph and label are drawn separately below so a longer label cannot
     // shift the glyph; the button only supplies the interaction surface.
     text: " "
-    fixedWidth: labelRow.implicitWidth + horizontalMargin * 2
+    fixedWidth: labelRow.width + horizontalMargin * 2
     foreground: "transparent"
     tooltipText: root.tooltip
 
@@ -315,9 +322,15 @@ BarWidget {
     anchors.left: button.left
     anchors.leftMargin: button.horizontalMargin
     anchors.verticalCenter: button.verticalCenter
-    spacing: root.pillLabel === "" ? 0 : Style.space(8)
+    spacing: Style.space(6)
+    // Explicit rather than implicit, so the clamped label width below is what
+    // sizes the button instead of the text's unclamped natural width.
+    width: iconText.implicitWidth
+      + (regionText.visible ? spacing + regionText.width : 0)
+      + (statusText.visible ? spacing + statusText.implicitWidth : 0)
 
     Text {
+      id: iconText
       text: root.icon
       textFormat: Text.PlainText
       color: root.stateColor
@@ -327,9 +340,27 @@ BarWidget {
       anchors.verticalCenter: parent.verticalCenter
     }
 
+    // Elides. A region label is context, and losing its tail costs little.
     Text {
-      visible: root.pillLabel !== "" && !root.vertical
-      text: root.pillLabel
+      id: regionText
+      visible: root.pillRegion !== "" && !root.vertical
+      text: root.pillRegion
+      textFormat: Text.PlainText
+      elide: Text.ElideRight
+      width: Math.min(implicitWidth, root.maxLabelWidth)
+      color: root.stateColor
+      font.family: button.fontFamily
+      font.pixelSize: button.fontSize
+      renderType: Text.NativeRendering
+      anchors.verticalCenter: parent.verticalCenter
+    }
+
+    // Never elides. The alert type and how long it has run are the whole
+    // point of the widget; a label must never be allowed to crowd them out.
+    Text {
+      id: statusText
+      visible: root.pillStatus !== "" && !root.vertical
+      text: root.pillStatus
       textFormat: Text.PlainText
       color: root.stateColor
       font.family: button.fontFamily

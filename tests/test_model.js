@@ -40,6 +40,16 @@ check("city label drops the m. prefix", "Kyiv", M.defaultLabel("м. Київ", "
 check("district label abbreviates raion", "Vinnytskyi r.", M.defaultLabel("Вінницький район", "District"));
 check("oblast label abbreviates oblast", "Kharkivska obl.", M.defaultLabel("Харківська область", "State"));
 check("hyphenated names survive", "Ivano-Frankivska obl.", M.defaultLabel("Івано-Франківська область", "State"));
+// "м. X та Xська територіальна громада" is a city and its hromada sharing one
+// entry. Romanized whole it ran the bar off the screen; the city is the point.
+check("a city-and-hromada entry reduces to the city",
+  "Kharkiv", M.defaultLabel("м. Харків та Харківська територіальна громада", "State"));
+check("another city-and-hromada entry",
+  "Zaporizhzhia", M.defaultLabel("м. Запоріжжя та Запорізька територіальна громада", "State"));
+check("a plain hromada abbreviates",
+  "Adzhamska hr.", M.defaultLabel("Аджамська територіальна громада", "Community"));
+check("a derived label is never longer than the cap",
+  true, M.defaultLabel("м. " + "Дуже".repeat(40) + " область", "State").length <= M.MAX_LABEL);
 
 // --- search -----------------------------------------------------------------
 
@@ -309,6 +319,29 @@ check("a capped count says so", "3+ alerts in the last 24h",
   M.historySummaryText(alarmsAt([1, 2, 3]), NOW, 24, 3));
 check("no alerts reads as calm", "No alerts in the last 24h",
   M.historySummaryText([], NOW, 24, 10));
+
+// --- pill parts -------------------------------------------------------------
+//
+// Drawn as two texts so the region label can elide while the alert type and
+// elapsed time -- the part that is actually information -- never does.
+
+check("a single region contributes no label part",
+  "", M.pillRegionLabel(M.aggregate(ALERT, NOW, NOW, 60), 1));
+check("several regions name the alerting one",
+  "A", M.pillRegionLabel(M.aggregate(ALERT, NOW, NOW, 60), 2));
+check("a clear pill has no label part",
+  "", M.pillRegionLabel(M.aggregate(CLEAR, NOW, NOW, 60), 2));
+check("status carries type and elapsed",
+  "AIR 1h 0m", M.pillStatus(M.aggregate(ALERT, NOW, NOW, 60), NOW));
+check("a stale status is marked extrapolated",
+  "~AIR 1h 0m", M.pillStatus(M.aggregate(ALERT, NOW - 61000, NOW, 60), NOW));
+check("a clear status is empty", "", M.pillStatus(M.aggregate(CLEAR, NOW, NOW, 60), NOW));
+check("an unknown status is a question mark", "?", M.pillStatus(M.aggregate(CLEAR, 0, NOW, 60), NOW));
+check("an unconfigured status prompts", "set region", M.pillStatus(M.aggregate([], NOW, NOW, 60), NOW));
+// The two parts still recompose into what pillText always returned.
+check("the parts recompose", "A AIR 1h 0m",
+  (M.pillRegionLabel(M.aggregate(ALERT, NOW, NOW, 60), 2) + " "
+   + M.pillStatus(M.aggregate(ALERT, NOW, NOW, 60), NOW)).trim());
 
 console.log("\n" + pass + " passed, " + fail + " failed");
 process.exit(fail === 0 ? 0 : 1);

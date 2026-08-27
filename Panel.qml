@@ -523,7 +523,7 @@ Panel {
             required property int index
             width: col.width
             height: resultRow.implicitHeight + Style.space(6)
-            radius: Style.radius.small
+            radius: Style.cornerRadius
             // The first result is what Enter takes.
             color: index === 0 ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08) : "transparent"
 

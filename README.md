@@ -176,6 +176,7 @@ All optional. Pinning `regions` in `shell.json` overrides the picker.
 | `pollSeconds` | `90` | Poll interval in seconds. Minimum 10. |
 | `staleAfterSeconds` | `60` | How long without a successful fetch before the data counts as stale. Floored at `pollSeconds * 2`, so 180s at the default interval. |
 | `icon` | `󰀦` | Bar glyph. |
+| `maxLabelWidth` | `110` | Pixel ceiling on the region label in the pill before it elides. The alert type and elapsed time are never elided. |
 
 Region ids: `./scripts/fetch-alerts --regions | jq -r '.regions[] | "\(.id)\t\(.name)"'`
 
@@ -226,7 +227,7 @@ last 24 hours — how many there have been says more than any single row.
 bash tests/run
 ```
 
-204 assertions: the fetch script against a stubbed `curl` (no request leaves
+217 assertions: the fetch script against a stubbed `curl` (no request leaves
 the machine), and every pure function in `Model.js` under node.
 
 ## Licence
