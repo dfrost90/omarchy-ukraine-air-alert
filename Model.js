@@ -269,6 +269,80 @@ function resolveRegions(shellRegions, stateRegions) {
   return out;
 }
 
+// --- selection editing ------------------------------------------------------
+//
+// The picker writes the state file through these. Kept pure and here rather
+// than inline in Panel.qml so they can actually be tested: they are the only
+// code in the plugin that changes which regions get watched.
+
+function copySelection(list) {
+  var out = [];
+  for (var i = 0; i < (list || []).length; i++) {
+    var r = list[i];
+    out.push({ id: r.id, name: r.name, type: r.type, label: r.label });
+  }
+  return out;
+}
+
+function addRegionTo(list, region) {
+  var out = copySelection(list);
+  if (!region || !isRegionId(region.id)) return out;
+  if (out.length >= MAX_REGIONS) return out;
+  for (var i = 0; i < out.length; i++) if (out[i].id === String(region.id)) return out;
+  var name = plain(region.name);
+  var type = String(region.type || "State");
+  out.push({
+    id: String(region.id),
+    name: name,
+    type: type,
+    label: plain(name ? defaultLabel(name, type) : String(region.id))
+  });
+  return out;
+}
+
+function removeRegionFrom(list, id) {
+  var out = [];
+  var src = copySelection(list);
+  for (var i = 0; i < src.length; i++) if (src[i].id !== String(id)) out.push(src[i]);
+  return out;
+}
+
+function relabelIn(list, id, label) {
+  var out = copySelection(list);
+  for (var i = 0; i < out.length; i++) {
+    if (out[i].id !== String(id)) continue;
+    var next = plain(label);
+    // An emptied field falls back to the derived name rather than leaving a
+    // blank pill that says nothing about which region it is.
+    out[i].label = next !== "" ? next
+      : plain(out[i].name ? defaultLabel(out[i].name, out[i].type) : out[i].id);
+  }
+  return out;
+}
+
+// How many alerts fell inside the window. `capped` means every entry we were
+// given is inside it, so the real number may be higher than what we fetched.
+function historySummary(alarms, nowMs, windowHours, fetchLimit) {
+  var list = alarms || [];
+  var cutoff = nowMs - windowHours * 3600000;
+  var count = 0;
+  var oldestInside = true;
+  for (var i = 0; i < list.length; i++) {
+    var started = Date.parse(String((list[i] || {}).startDate || ""));
+    if (isNaN(started)) continue;
+    if (started >= cutoff) count++;
+    else oldestInside = false;
+  }
+  return { count: count, capped: oldestInside && list.length >= fetchLimit };
+}
+
+function historySummaryText(alarms, nowMs, windowHours, fetchLimit) {
+  var s = historySummary(alarms, nowMs, windowHours, fetchLimit);
+  if (s.count === 0) return "No alerts in the last " + windowHours + "h";
+  var noun = s.count === 1 ? " alert in the last " : " alerts in the last ";
+  return s.count + (s.capped ? "+" : "") + noun + windowHours + "h";
+}
+
 // --- state ------------------------------------------------------------------
 
 function aggregate(regions, lastOkFetchMs, nowMs, staleAfterSeconds) {
@@ -307,6 +381,22 @@ function formatElapsed(sinceIso, nowMs) {
   // has to stay readable at four digits of days.
   if (day < 30) return day + "d " + (hr % 24) + "h";
   return day + "d";
+}
+
+// The API returns .NET TimeSpan strings: "HH:MM:SS.fffffff", and the hour
+// field can exceed 24. Rendered the same way as a running alert's elapsed
+// time so the two columns read alike.
+function formatDuration(text) {
+  var m = /^(\d+):(\d{2}):(\d{2})/.exec(String(text || "").trim());
+  if (!m) return "";
+  var hours = parseInt(m[1], 10);
+  var minutes = parseInt(m[2], 10);
+  var total = hours * 60 + minutes;
+  if (total < 1) return "<1m";
+  if (total < 60) return total + "m";
+  if (hours < 24) return hours + "h " + minutes + "m";
+  var days = Math.floor(hours / 24);
+  return days + "d " + (hours % 24) + "h";
 }
 
 var ABBREV = {
@@ -350,8 +440,15 @@ if (typeof module !== "undefined") {
     MAX_POLL_INTERVAL: MAX_POLL_INTERVAL,
     parsePayload: parsePayload,
     resolveRegions: resolveRegions,
+    copySelection: copySelection,
+    addRegionTo: addRegionTo,
+    removeRegionFrom: removeRegionFrom,
+    relabelIn: relabelIn,
+    historySummary: historySummary,
+    historySummaryText: historySummaryText,
     aggregate: aggregate,
     formatElapsed: formatElapsed,
+    formatDuration: formatDuration,
     alertAbbrev: alertAbbrev,
     pillText: pillText
   };

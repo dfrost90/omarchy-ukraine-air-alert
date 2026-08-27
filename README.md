@@ -217,6 +217,8 @@ consecutive failures double the poll interval (capped at 5 minutes) until one
 succeeds. A rate-limited or offline upstream is never polled at full speed.
 
 Alert history is fetched only when the panel is opened, and cached for 60s.
+The panel lists the three most recent alerts per region plus a count over the
+last 24 hours — how many there have been says more than any single row.
 
 ## Tests
 
@@ -224,7 +226,7 @@ Alert history is fetched only when the panel is opened, and cached for 60s.
 bash tests/run
 ```
 
-167 assertions: the fetch script against a stubbed `curl` (no request leaves
+204 assertions: the fetch script against a stubbed `curl` (no request leaves
 the machine), and every pure function in `Model.js` under node.
 
 ## Licence

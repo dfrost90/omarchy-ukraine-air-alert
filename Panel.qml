@@ -61,6 +61,13 @@ Panel {
   // a minute.
   readonly property int maxPayload: Model.MAX_PAYLOAD_BYTES
 
+  // Fetched deep enough for a trustworthy 24h count, but only the three most
+  // recent are listed -- the rest is one summary line, because how many there
+  // have been says more than any single row.
+  readonly property int historyFetchLimit: 24
+  readonly property int historyShown: 3
+  readonly property int historyWindowHours: 24
+
   property var history: ({})
   property double historyFetchedAt: 0
   property bool historyFailed: false
@@ -79,6 +86,7 @@ Panel {
   Component {
     id: historyProc
     Process {
+      id: proc
       property string regionId: ""
       running: true
       // Through the fetch script rather than curl directly, so this request is
@@ -96,7 +104,7 @@ Panel {
             var parsed = JSON.parse(raw)
             if (!parsed || parsed.ok !== true) { root.historyFailed = true; return }
             var next = root.history
-            next[parent.regionId] = (parsed.alarms || []).slice(0, 10)
+            next[proc.regionId] = (parsed.alarms || []).slice(0, root.historyFetchLimit)
             root.history = next
             root.historyChanged()
           } catch (e) {
@@ -108,9 +116,17 @@ Panel {
         // A history failure is never allowed to touch the pill's state.
         if (code !== 0) root.historyFailed = true
         root.historyPending = Math.max(0, root.historyPending - 1)
-        destroy()
+        proc.destroy()
       }
     }
+  }
+
+  // True once any watched region has at least one history entry, so the
+  // section can stay hidden rather than showing an empty heading.
+  readonly property bool hasHistory: {
+    for (var i = 0; i < regions.length; i++)
+      if (historyFor(regions[i].id).length > 0) return true
+    return false
   }
 
   function historyFor(id) {
@@ -123,7 +139,7 @@ Panel {
     var when = isNaN(start) ? "?" : Qt.formatDateTime(new Date(start), "d MMM HH:mm")
     // isContinue means the alert is still running, so a duration of zero is
     // "ongoing" rather than an instantaneous alert.
-    var dur = entry.isContinue === true ? "ongoing" : Model.plain(entry.duration, 24).replace(/^00:/, "")
+    var dur = entry.isContinue === true ? "ongoing" : Model.formatDuration(entry.duration)
     return when + "  " + type + "  " + dur
   }
 
@@ -207,16 +223,7 @@ Panel {
   }
 
   function currentSelection() {
-    var out = []
-    for (var i = 0; i < configured.length; i++) {
-      out.push({
-        id: configured[i].id,
-        name: configured[i].name,
-        type: configured[i].type,
-        label: configured[i].label
-      })
-    }
-    return out
+    return Model.copySelection(configured)
   }
 
   function saveSelection(list) {
@@ -224,33 +231,16 @@ Panel {
   }
 
   function addRegion(r) {
-    var list = currentSelection()
-    for (var i = 0; i < list.length; i++) if (list[i].id === r.id) return
-    list.push({
-      id: r.id,
-      name: r.name,
-      type: r.type,
-      label: Model.defaultLabel(r.name, r.type)
-    })
-    saveSelection(list)
+    saveSelection(Model.addRegionTo(currentSelection(), r))
     query = ""
   }
 
   function removeRegion(id) {
-    var list = currentSelection()
-    var out = []
-    for (var i = 0; i < list.length; i++) if (list[i].id !== id) out.push(list[i])
-    saveSelection(out)
+    saveSelection(Model.removeRegionFrom(currentSelection(), id))
   }
 
   function relabelRegion(id, label) {
-    var list = currentSelection()
-    for (var i = 0; i < list.length; i++) {
-      // name is the region's identity and is never rewritten; label is only
-      // what gets drawn.
-      if (list[i].id === id) list[i].label = String(label || "")
-    }
-    saveSelection(list)
+    saveSelection(Model.relabelIn(currentSelection(), id, label))
   }
 
   readonly property bool shellPinned: hostWidget
@@ -371,7 +361,7 @@ Panel {
         PanelSeparator { width: parent.width }
 
         PanelSectionHeader {
-          visible: root.regions.length > 0
+          visible: root.hasHistory || root.historyFailed
           text: "RECENT"
           foreground: root.fg
         }
@@ -404,7 +394,7 @@ Panel {
             }
 
             Repeater {
-              model: root.historyFor(modelData.id)
+              model: root.historyFor(modelData.id).slice(0, root.historyShown)
 
               Text {
                 required property var modelData
@@ -415,19 +405,17 @@ Panel {
                 font.pixelSize: Style.font.bodySmall
               }
             }
-          }
-        }
 
-        Text {
-          visible: root.regions.length > 0
-          width: parent.width
-          text: "Unofficial indicator — rely on official alerts."
-          textFormat: Text.PlainText
-          wrapMode: Text.WordWrap
-          color: Color.muted
-          font.family: root.fontFam
-          font.pixelSize: Style.font.caption
-          font.italic: true
+            Text {
+              text: Model.historySummaryText(
+                root.historyFor(parent.modelData.id),
+                Date.now(), root.historyWindowHours, root.historyFetchLimit)
+              textFormat: Text.PlainText
+              color: Color.muted
+              font.family: root.fontFam
+              font.pixelSize: Style.font.caption
+            }
+          }
         }
 
         // ---- picker ----------------------------------------------------------
@@ -579,6 +567,19 @@ Panel {
               }
             }
           }
+        }
+
+        PanelSeparator { width: parent.width }
+
+        Text {
+          width: parent.width
+          text: "Unofficial indicator — data can be delayed or wrong. Rely on official alerts."
+          textFormat: Text.PlainText
+          wrapMode: Text.WordWrap
+          color: Color.muted
+          font.family: root.fontFam
+          font.pixelSize: Style.font.caption
+          font.italic: true
         }
       }
     }

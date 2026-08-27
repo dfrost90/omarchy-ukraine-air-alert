@@ -41,7 +41,7 @@ MAX_CACHE=${AIR_ALERT_MAX_CACHE:-1048576}
 
 # Each configured region costs an argv entry, a request, and a QML row.
 MAX_REGION_COUNT=32
-MAX_HISTORY_ENTRIES=10
+MAX_HISTORY_ENTRIES=24
 
 TIMEOUT=8
 SINCE=""

@@ -378,7 +378,7 @@ for i in $(seq 1 400); do big="$big{\"alertType\":\"AIR\",\"startDate\":\"2026-0
 big="${big%,}]}]"
 body "/api/v3/alerts/regionHistory?regionId=31" "$big"
 out=$("$FETCH" --history 31)
-check "history entries are capped" "true" "$(jq -r '(.alarms | length) <= 10' <<<"$out")"
+check "history entries are capped" "24" "$(jq -r '.alarms | length' <<<"$out")"
 teardown
 
 setup

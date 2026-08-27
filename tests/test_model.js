@@ -223,5 +223,92 @@ check("backoff is capped", M.MAX_POLL_INTERVAL, M.pollInterval(15, 20));
 check("a slow base interval is still capped", M.MAX_POLL_INTERVAL, M.pollInterval(600, 5));
 check("a negative failure count is treated as none", 15, M.pollInterval(15, -3));
 
+// --- durations --------------------------------------------------------------
+//
+// The API returns .NET TimeSpan strings with seven fractional digits. Stripping
+// a leading "00:" turned 00:43:55 into 43:55, which reads as 43 hours -- an
+// alert that lasted 44 minutes rendered as nearly two days.
+
+check("hours and minutes", "1h 27m", M.formatDuration("01:27:57.6452720"));
+check("under an hour drops the hour part", "43m", M.formatDuration("00:43:55.7405890"));
+check("minutes without fractional seconds", "12m", M.formatDuration("00:12:55"));
+check("three hours", "3h 6m", M.formatDuration("03:06:12.9741560"));
+check("a duration over a day", "1d 2h", M.formatDuration("26:03:00"));
+check("under a minute", "<1m", M.formatDuration("00:00:42.1"));
+check("zero", "<1m", M.formatDuration("00:00:00"));
+check("an empty duration is empty", "", M.formatDuration(""));
+check("junk is empty rather than misleading", "", M.formatDuration("banana"));
+check("a null duration is empty", "", M.formatDuration(null));
+
+// --- selection editing ------------------------------------------------------
+//
+// The picker's add/remove/relabel used to build these lists inline in QML,
+// where nothing could reach them. They are the only paths that write the
+// state file, so they are the last place that should have been untested.
+
+const SEL = [{ id: "31", name: "м. Київ", type: "State", label: "Kyiv" }];
+
+check("adding appends",
+  ["31", "27"],
+  M.addRegionTo(SEL, { id: "27", name: "Львівська область", type: "State" }).map(function (r) { return r.id; }));
+check("adding derives a label",
+  "Lvivska obl.",
+  M.addRegionTo(SEL, { id: "27", name: "Львівська область", type: "State" })[1].label);
+check("adding the same region twice is a no-op",
+  1, M.addRegionTo(SEL, { id: "31", name: "м. Київ", type: "State" }).length);
+check("adding an invalid id is refused",
+  1, M.addRegionTo(SEL, { id: "--regions", name: "x", type: "State" }).length);
+check("adding does not mutate the original list", 1, SEL.length);
+
+const FULL = [];
+for (let i = 0; i < M.MAX_REGIONS; i++) FULL.push({ id: String(i + 1), name: "x", type: "State", label: "x" });
+check("adding past the cap is refused",
+  M.MAX_REGIONS, M.addRegionTo(FULL, { id: "9999", name: "y", type: "State" }).length);
+
+check("removing drops the entry", [], M.removeRegionFrom(SEL, "31").map(function (r) { return r.id; }));
+check("removing an absent id changes nothing", ["31"], M.removeRegionFrom(SEL, "77").map(function (r) { return r.id; }));
+check("removing does not mutate the original", 1, SEL.length);
+
+check("relabelling changes the label", "Home", M.relabelIn(SEL, "31", "Home")[0].label);
+// The name is the region's identity; only the label is presentation.
+check("relabelling never touches the name", "м. Київ", M.relabelIn(SEL, "31", "Home")[0].name);
+check("relabelling sanitises markup", -1, M.relabelIn(SEL, "31", "<img src=x>")[0].label.indexOf("<"));
+check("an empty label falls back to the derived one", "Kyiv", M.relabelIn(SEL, "31", "")[0].label);
+check("relabelling an absent id changes nothing", "Kyiv", M.relabelIn(SEL, "77", "Nope")[0].label);
+check("relabelling does not mutate the original", "Kyiv", SEL[0].label);
+
+// --- history summary --------------------------------------------------------
+//
+// Three rows is enough to read; the count over the last day is the part that
+// actually says how bad it has been.
+
+function alarmsAt(hoursAgo) {
+  return hoursAgo.map(function (h) {
+    return { startDate: new Date(NOW - h * 3600000).toISOString(), alertType: "AIR" };
+  });
+}
+
+check("counts alerts inside the window", 3, M.historySummary(alarmsAt([1, 5, 20]), NOW, 24, 10).count);
+check("excludes alerts older than the window", 2, M.historySummary(alarmsAt([1, 5, 30]), NOW, 24, 10).count);
+check("an empty history counts zero", 0, M.historySummary([], NOW, 24, 10).count);
+check("not capped when under the fetch limit", false, M.historySummary(alarmsAt([1, 2]), NOW, 24, 10).capped);
+// Every fetched entry is inside the window, so there may be more we never saw.
+check("capped when every fetched entry is in the window",
+  true, M.historySummary(alarmsAt([1, 2, 3]), NOW, 24, 3).capped);
+check("not capped when the oldest fetched entry falls outside",
+  false, M.historySummary(alarmsAt([1, 2, 30]), NOW, 24, 3).capped);
+check("unparseable dates are skipped, not counted",
+  1, M.historySummary([{ startDate: "junk" }, { startDate: new Date(NOW - 3600000).toISOString() }], NOW, 24, 10).count);
+check("a null history does not throw", 0, M.historySummary(null, NOW, 24, 10).count);
+
+check("summary text reads naturally", "3 alerts in the last 24h",
+  M.historySummaryText(alarmsAt([1, 5, 20]), NOW, 24, 10));
+check("one alert is singular", "1 alert in the last 24h",
+  M.historySummaryText(alarmsAt([2]), NOW, 24, 10));
+check("a capped count says so", "3+ alerts in the last 24h",
+  M.historySummaryText(alarmsAt([1, 2, 3]), NOW, 24, 3));
+check("no alerts reads as calm", "No alerts in the last 24h",
+  M.historySummaryText([], NOW, 24, 10));
+
 console.log("\n" + pass + " passed, " + fail + " failed");
 process.exit(fail === 0 ? 0 : 1);
