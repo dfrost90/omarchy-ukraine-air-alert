@@ -15,8 +15,10 @@ not be relied on as one.**
 
 - **Not official.** This plugin is not affiliated with, endorsed by, or
   operated by the State Emergency Service of Ukraine, the Armed Forces, any
-  oblast administration, or any other authority. It reads a free, unofficial,
-  community-run third-party mirror.
+  oblast administration, or any other authority. Nor is it affiliated with any
+  air alert app, service or mirror, including the ones it reads from. It is an
+  independent hobby project that reads a free, unofficial, community-run
+  third-party mirror.
 - **It can be wrong.** Data can be delayed, incomplete, cached, or simply
   incorrect. The upstream service can go offline or return stale values with
   no indication that it has.
@@ -97,8 +99,8 @@ component.
 - **Network:** outbound HTTPS to `siren.pp.ua` only. Nothing else is contacted.
 - **What is sent:** the region ids you selected, in the URL path. No
   identifiers, no telemetry, no analytics, no user agent beyond curl's default.
-- **Privileges:** none. No `sudo`, no `pkexec`, no setuid, no privileged
-  helper, no system files touched.
+- **Privileges:** none. No sudo or pkexec is required. There is no setuid
+  binary, no privileged helper, and no system file is touched.
 - **Files written:** exactly two, both its own —
   `~/.local/state/omarchy/settings/air-alert.json` (your region choice) and
   `~/.cache/omarchy/air-alert/regions.json` (the cached region list). It never
@@ -243,6 +245,71 @@ bash tests/run
 
 229 assertions: the fetch script against a stubbed `curl` (no request leaves
 the machine), and every pure function in `Model.js` under node.
+
+## Legal
+
+Short version: the code is mine and MIT-licensed, the data is public
+information that Ukrainian law places outside copyright, and the endpoint is
+public and keyless. Nothing here is redistributed under someone else's terms.
+
+**The code.** Every line in this repository is original work, licensed
+[MIT](LICENSE). No third-party source is vendored, bundled or linked. In
+particular this plugin does *not* use
+[`uasiren`](https://github.com/PaulAnnekov/uasiren), the Python client library
+for the same service — that repository ships no licence file, so its code
+would not be safe to reuse. This plugin talks to the HTTP endpoint directly,
+which is a different thing from reusing the client.
+
+**The data.** Air raid alert records are bare facts — an alert is on, or it is
+not. Under Ukrainian copyright law they are not anyone's property to license:
+
+- Law No. 2811-IX *On Copyright and Related Rights*, Art. 8(1)(1) — copyright
+  does not protect *"повідомлення про новини або інші факти, що мають характер
+  звичайної прес-інформації"* (reports of news or other facts having the
+  character of ordinary press information).
+- Art. 8(1)(3) puts acts and official documents of state bodies outside
+  copyright as well.
+- The region catalogue is a database, so the *sui generis* database right in
+  Art. 21(4) is the thing to check — and Art. 21(4) excludes it by its own
+  terms for *"бази, створеної для систематизації даних, що є публічною
+  інформацією"* (a database created to systematize data that is public
+  information under the Access to Public Information Act). A catalogue of
+  Ukrainian oblasts and raions used to route public civil-defence warnings is
+  exactly that.
+
+**The endpoint.** [`siren.pp.ua`](https://siren.pp.ua) is published by Pavlo
+Annekov as an explicitly *public* wrapper around the official
+[UkraineAlarm](https://api.ukrainealarm.com) API. It requires no key, no
+account and no registration, and it publishes no terms of service to accept or
+breach. Its one stated limit is **50 requests per minute per IP**. This plugin
+uses roughly **0.7 requests per minute** at its default interval, and backs off
+on failure — see [How it polls](#how-it-polls). The official UkraineAlarm API
+issues keys by request form; this plugin never contacts it directly, so no key
+terms bind it or you.
+
+**No marks, no emblems.** This plugin uses no logo, wordmark, state symbol,
+military insignia or municipal coat of arms. Its name is plain description of
+what it shows. The bar glyph is a codepoint rendered from whatever Nerd Font
+you already have installed; no font is shipped here.
+
+**Privacy.** No accounts, no telemetry, no analytics, no identifiers. The only
+thing this plugin sends is the numeric region ids you picked, in the URL path.
+Being honest about the one unavoidable exposure: any HTTP request reveals your
+IP address to the host that answers it, and `siren.pp.ua` is no exception.
+That is the same exposure as loading its website, and nothing beyond it is
+transmitted.
+
+**Warranty.** None, and this matters more here than in most software. The MIT
+licence's "AS IS, WITHOUT WARRANTY OF ANY KIND" is not boilerplate in a tool
+that sits next to a life-safety question — read the disclaimer at the top and
+mean it.
+
+## Credits
+
+- [Pavlo Annekov](https://github.com/PaulAnnekov) for running
+  [`siren.pp.ua`](https://siren.pp.ua) as a free public service. Not required
+  to be credited; credited anyway, because someone pays for that server.
+- [UkraineAlarm](https://api.ukrainealarm.com) as the upstream source.
 
 ## Licence
 
