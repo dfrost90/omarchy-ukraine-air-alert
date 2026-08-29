@@ -229,6 +229,10 @@ Panel {
   function saveSelection(list, primary) {
     var id = Model.resolvePrimaryId(list, primary === undefined ? root.primaryId : primary)
     stateFile.setText(JSON.stringify({ regions: list, primaryId: id }, null, 2) + "\n")
+    // Tell the widget directly: its FileView watcher may never have attached
+    // (the state file and its directory usually do not exist at shell start),
+    // so the write alone would leave the pill stuck on "set region".
+    if (hostWidget) hostWidget.applySelection(list, id)
   }
 
   // Only meaningful with more than one region watched, and only when several

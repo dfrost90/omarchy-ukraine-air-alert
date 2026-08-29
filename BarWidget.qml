@@ -181,6 +181,19 @@ BarWidget {
     onLoadFailed: root.stateRegions = []
   }
 
+  // The state file and even its parent directory usually do not exist when the
+  // shell starts, and a FileView cannot watch a path that is not there yet — so
+  // stateView's watcher silently never attaches and the first save goes unseen.
+  // Watching the settings directory catches the file being created; the picker
+  // also calls applySelection() directly, so this is only the cross-process and
+  // hand-edit path.
+  FileView {
+    path: root.stateFile.replace(/\/[^/]*$/, "")
+    watchChanges: true
+    printErrors: false
+    onFileChanged: stateView.reload()
+  }
+
   function readState() {
     try {
       var parsed = JSON.parse(stateView.text())
@@ -190,6 +203,15 @@ BarWidget {
       stateRegions = []
       statePrimaryId = ""
     }
+  }
+
+  // Called by the picker straight after it writes the state file, so a new
+  // selection takes effect immediately rather than waiting on a file-watch
+  // event that may never come (see the directory watcher above). The list is
+  // the same shape readState() pulls out of the file.
+  function applySelection(regionList, primary) {
+    stateRegions = regionList || []
+    statePrimaryId = String(primary || "")
   }
 
   onRegionsChanged: {
