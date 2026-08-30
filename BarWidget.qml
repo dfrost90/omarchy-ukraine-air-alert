@@ -197,12 +197,33 @@ BarWidget {
   function readState() {
     try {
       var parsed = JSON.parse(stateView.text())
-      stateRegions = (parsed && parsed.regions) ? parsed.regions : []
-      statePrimaryId = (parsed && parsed.primaryId) ? String(parsed.primaryId) : ""
+      var nextRegions = (parsed && parsed.regions) ? parsed.regions : []
+      var nextPrimary = (parsed && parsed.primaryId) ? String(parsed.primaryId) : ""
+      // Assigned only on a real change. resolveRegions returns a fresh array
+      // on every call, so onRegionsChanged -- which drops the fetch gate and
+      // re-polls -- would fire for every reload that changed nothing, and the
+      // startup-race workaround below reloads speculatively several times.
+      if (JSON.stringify(nextRegions) !== JSON.stringify(stateRegions))
+        stateRegions = nextRegions
+      if (nextPrimary !== statePrimaryId)
+        statePrimaryId = nextPrimary
     } catch (e) {
-      stateRegions = []
-      statePrimaryId = ""
+      if (stateRegions.length) stateRegions = []
+      if (statePrimaryId !== "") statePrimaryId = ""
     }
+  }
+
+  // Quickshell 0.3.1's FileView sometimes never delivers its initial load when
+  // the read races shell startup -- the bundled weather panel hits the same
+  // race and works around it the same way. Without this the pill sits on "set
+  // region" after a cold boot despite a saved region, until the file is written
+  // again. readState() dedupes, so a reload that finds nothing new is a no-op.
+  Timer {
+    running: true
+    repeat: true
+    interval: 1000
+    property int shots: 0
+    onTriggered: { stateView.reload(); if (++shots >= 4) running = false }
   }
 
   // Called by the picker straight after it writes the state file, so a new

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.dfrost90.air-alert",
   "name": "Ukraine Air Alert",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "author": "dfrost",
   "license": "MIT",
   "description": "Air raid alert status for selected regions of Ukraine, from the keyless siren.pp.ua mirror of the official UkraineAlarm API. Unofficial and passive: no notifications, no sound. Not a life-safety system.",
