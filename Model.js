@@ -191,9 +191,15 @@ function plain(value, maxLen) {
 // something succeeds and resets it.
 var MAX_POLL_INTERVAL = 300;
 
-function pollInterval(baseSeconds, consecutiveFailures) {
+function pollInterval(baseSeconds, consecutiveFailures, hasSuccessfulFetch) {
   var n = consecutiveFailures > 0 ? consecutiveFailures : 0;
   if (n > 16) n = 16;
+  // Login can precede network readiness. Without any data yet, recover in
+  // 10, 20, 40... seconds instead of waiting 3–5 minutes after one failure.
+  // Still back off during a prolonged outage to respect the upstream limit.
+  if (hasSuccessfulFetch === false && n > 0) {
+    return Math.min(10 * Math.pow(2, n - 1), MAX_POLL_INTERVAL);
+  }
   var seconds = baseSeconds * Math.pow(2, n);
   return seconds > MAX_POLL_INTERVAL ? MAX_POLL_INTERVAL : seconds;
 }

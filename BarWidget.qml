@@ -82,7 +82,13 @@ BarWidget {
 
   onTickChanged: recompute()
   onPrimaryIdChanged: recompute()
-  Component.onCompleted: { activeRegions = regions; recompute() }
+  property bool initialized: false
+  Component.onCompleted: {
+    activeRegions = regions
+    recompute()
+    initialized = true
+    Qt.callLater(root.poll)
+  }
 
   readonly property color stateColor:
     agg.status === "alert" ? Color.urgent
@@ -115,7 +121,7 @@ BarWidget {
   property var liveRegions: []
 
   function poll() {
-    if (!regions.length || pollProc.running) return
+    if (!initialized || !regions.length || pollProc.running) return
     var args = [root.script]
     if (lastActionIndex !== "") {
       args.push("--since")
@@ -249,10 +255,10 @@ BarWidget {
     id: pollTimer
     // Widens on consecutive failures so a rate-limited or down upstream is
     // not polled at full speed for hours.
-    interval: Model.pollInterval(root.pollSeconds, root.consecutiveFailures) * 1000
-    running: root.regions.length > 0
+    interval: Model.pollInterval(root.pollSeconds, root.consecutiveFailures,
+                                 root.lastOkFetch > 0) * 1000
+    running: root.initialized && root.regions.length > 0
     repeat: true
-    triggeredOnStart: true
     onTriggered: root.poll()
   }
 

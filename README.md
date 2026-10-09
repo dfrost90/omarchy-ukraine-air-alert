@@ -73,6 +73,17 @@ Then put it on the bar:
 omarchy bar move io.github.dfrost90.air-alert --section right
 ```
 
+## Update
+
+```bash
+omarchy plugin update io.github.dfrost90.air-alert
+```
+
+Omarchy fetches the repository's default branch, shows the changes for review,
+and fast-forwards the installed checkout after confirmation. It validates the
+plugin and rescans the shell automatically. Your selected regions are stored
+outside the plugin directory and are preserved.
+
 ## Removal
 
 ```bash
@@ -231,7 +242,10 @@ you find out from — see the disclaimer.
 
 The mirror answers `429` after roughly five requests in quick succession, so
 consecutive failures double the poll interval (capped at 5 minutes) until one
-succeeds. A rate-limited or offline upstream is never polled at full speed.
+succeeds. Before the first successful fetch, retries instead start at 10 seconds
+and double up to the same cap, so a network that comes online after login does
+not leave the widget waiting several minutes after its first failed request.
+Normal polling resumes after a successful fetch.
 
 Alert history is fetched only when the panel is opened, and cached for 60s.
 The panel lists the three most recent alerts per region plus a count over the

@@ -1,5 +1,16 @@
 # Changelog — Ukraine Air Alert
 
+## 1.0.3 — 2026-10-09
+
+- Start polling after the widget finishes initializing.
+- Retry a failed initial fetch after 10 seconds, then back off exponentially
+  up to 5 minutes. This lets the widget recover when the network is unavailable
+  at login without needing a click. Normal polling resumes after success.
+- Add regression coverage for startup retries and normal polling recovery.
+
+Validated with Omarchy's plugin validator, 234 automated checks, a simulated
+offline startup, and a user-confirmed system startup.
+
 ## 1.0.2
 
 - Fix: after a cold boot the pill could sit on "set region" even though a

@@ -232,6 +232,11 @@ check("two failures double again", 60, M.pollInterval(15, 2));
 check("backoff is capped", M.MAX_POLL_INTERVAL, M.pollInterval(15, 20));
 check("a slow base interval is still capped", M.MAX_POLL_INTERVAL, M.pollInterval(600, 5));
 check("a negative failure count is treated as none", 15, M.pollInterval(15, -3));
+check("offline startup retries after ten seconds", 10, M.pollInterval(90, 1, false));
+check("startup retries back off", 20, M.pollInterval(90, 2, false));
+check("long startup outages remain capped", 300, M.pollInterval(90, 20, false));
+check("successful startup resumes normal polling", 90, M.pollInterval(90, 0, true));
+check("failures after a successful fetch retain normal backoff", 180, M.pollInterval(90, 1, true));
 
 // --- durations --------------------------------------------------------------
 //
